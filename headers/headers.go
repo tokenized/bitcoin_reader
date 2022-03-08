@@ -62,13 +62,13 @@ var (
 
 // Repository is used for managing header data.
 type Repository struct {
-	config                     *Config
-	store                      storage.Storage
-	newHeadersAvailableChannel *chan *wire.BlockHeader
-	longest                    *Branch
-	branches                   Branches
-	disableDifficulty          bool
-	disableSplitProtection     bool
+	config                 *Config
+	store                  storage.Storage
+	newHeadersChannels     []chan *wire.BlockHeader
+	longest                *Branch
+	branches               Branches
+	disableDifficulty      bool
+	disableSplitProtection bool
 
 	// Chain split data
 	requiredSplit *Split
@@ -123,7 +123,7 @@ func (repo *Repository) GetNewHeadersAvailableChannel() <-chan *wire.BlockHeader
 	result := make(chan *wire.BlockHeader, 10000)
 
 	repo.Lock()
-	repo.newHeadersAvailableChannel = &result
+	repo.newHeadersChannels = append(repo.newHeadersChannels, result)
 	repo.Unlock()
 
 	return result
@@ -162,7 +162,8 @@ func (repo *Repository) HashHeight(hash bitcoin.Hash32) int {
 	repo.Lock()
 	defer repo.Unlock()
 
-	return repo.longest.Find(hash)
+	_, height := repo.branches.Find(hash)
+	return height
 }
 
 func (repo *Repository) PreviousHash(hash bitcoin.Hash32) (*bitcoin.Hash32, int) {
@@ -186,9 +187,9 @@ func (repo *Repository) Stop(ctx context.Context) {
 	repo.Lock()
 	defer repo.Unlock()
 
-	if repo.newHeadersAvailableChannel != nil {
-		close(*repo.newHeadersAvailableChannel)
-		repo.newHeadersAvailableChannel = nil
+	for _, channel := range repo.newHeadersChannels {
+		close(channel)
+		repo.newHeadersChannels = nil
 	}
 }
 
@@ -409,13 +410,16 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 				logger.Stringer("previous_block_hash", header.PrevBlock),
 				logger.Int("block_height", longest.Height()),
 				logger.Stringer("block_hash", longest.Last().Hash),
+				logger.String("previous_work", repo.longest.Last().AccumulatedWork.Text(16)),
+				logger.String("new_work", longest.Last().AccumulatedWork.Text(16)),
 			}, "New longest header branch")
 
-			if repo.newHeadersAvailableChannel != nil {
-				*repo.newHeadersAvailableChannel <- header
+			if err := repo.sendBranchUpdate(longest, repo.longest); err != nil {
+				return errors.Wrap(err, "send branch update")
 			}
+
+			repo.longest = longest
 		}
-		repo.longest = longest
 
 		return nil
 	}
@@ -424,6 +428,7 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 		return errors.New("Failed to add header to branch")
 	}
 
+	headersSent := false
 	if previousBranch != repo.longest {
 		longest := repo.branches.Longest()
 		if repo.longest != longest {
@@ -431,12 +436,15 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 				logger.Stringer("intersect_block_hash", repo.longest.IntersectHash(longest)),
 				logger.Int("block_height", longest.Height()),
 				logger.Stringer("block_hash", longest.Last().Hash),
+				logger.String("previous_work", repo.longest.Last().AccumulatedWork.Text(16)),
+				logger.String("new_work", longest.Last().AccumulatedWork.Text(16)),
 			}, "New longest header branch")
 
-			if repo.newHeadersAvailableChannel != nil {
-				*repo.newHeadersAvailableChannel <- header
+			if err := repo.sendBranchUpdate(longest, repo.longest); err != nil {
+				return errors.Wrap(err, "send branch update")
 			}
 
+			headersSent = true
 			repo.longest = longest
 		}
 	}
@@ -459,8 +467,10 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 			}
 		}
 
-		if repo.newHeadersAvailableChannel != nil {
-			*repo.newHeadersAvailableChannel <- header
+		if !headersSent {
+			for _, channel := range repo.newHeadersChannels {
+				channel <- header
+			}
 		}
 	} else {
 		logger.InfoWithFields(ctx, []logger.Field{
@@ -469,6 +479,33 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 			logger.Int("block_height", previousBranch.Height()),
 			logger.Stringer("block_hash", previousBranch.Last().Hash),
 		}, "New branch chain tip")
+	}
+
+	return nil
+}
+
+func (repo *Repository) sendBranchUpdate(branch, previousLongest *Branch) error {
+	intersect := branch.IntersectHash(previousLongest)
+	if intersect == nil {
+		return errors.New("Intersect not found")
+	}
+
+	branchHeight := branch.Find(*intersect)
+	if branchHeight == -1 {
+		return errors.New("Intersect missing")
+	}
+	height := branchHeight + 1
+	latestHeight := branch.Height()
+
+	for ; height <= latestHeight; height++ {
+		item := branch.AtHeight(height)
+		if item == nil {
+			return errors.New("Height Unavailable")
+		}
+
+		for _, channel := range repo.newHeadersChannels {
+			channel <- item.Header
+		}
 	}
 
 	return nil

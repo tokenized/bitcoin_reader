@@ -165,6 +165,7 @@ func (b Branch) AtHeight(height int) *HeaderData {
 		if offset < 0 {
 			return nil // pruned and not available
 		}
+
 		return b.headers[offset]
 	}
 
@@ -240,11 +241,15 @@ func (b Branch) GetLocatorHashes(splits Splits, delta, max int) HeightHashes {
 	return result
 }
 
-// Find returns the branch containing the header and the height in that branch.
+// Find returns the height of the hash in the branch.
 func (b Branch) Find(hash bitcoin.Hash32) int {
 	height, exists := b.heightsMap[hash]
 	if exists {
 		return height
+	}
+
+	if b.parent != nil {
+		return b.parent.Find(hash)
 	}
 
 	return -1
