@@ -52,6 +52,7 @@ type NodeManager struct {
 	blockManagerThread *threads.Thread
 
 	initialDelayComplete bool
+	inSync               bool
 
 	syncBlocksWait sync.WaitGroup
 	wait           sync.WaitGroup
@@ -256,6 +257,10 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 	if resultErr != nil {
 		m.Stop(ctx)
 		return resultErr
+	}
+
+	if uint32(time.Now().Unix())-m.headers.LastTime() < 3600 {
+		m.inSync = true
 	}
 
 	var stopper threads.StopCombiner
@@ -547,10 +552,20 @@ func (m *NodeManager) MonitorHeaders(ctx context.Context) error {
 	countSinceLastRequest := 0
 	for {
 		select {
-		case _, ok := <-headersChannel:
+		case header, ok := <-headersChannel:
 			if !ok {
 				return nil
 			}
+
+			m.Lock()
+			if !m.inSync {
+				age := header.Timestamp - uint32(time.Now().Unix())
+				if age < 3600 {
+					m.inSync = true
+				}
+			}
+			inSync := m.inSync
+			m.Unlock()
 
 			now := time.Now()
 			countSinceLastRequest++
@@ -566,7 +581,9 @@ func (m *NodeManager) MonitorHeaders(ctx context.Context) error {
 				countSinceLastRequest = 0
 			}
 
-			m.TriggerBlockSynchronize(ctx)
+			if inSync {
+				m.TriggerBlockSynchronize(ctx)
+			}
 		}
 	}
 }

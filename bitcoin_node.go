@@ -81,6 +81,7 @@ type HeaderRepository interface {
 	Height() int
 	HashHeight(hash bitcoin.Hash32) int
 	LastHash() bitcoin.Hash32
+	LastTime() uint32
 	PreviousHash(bitcoin.Hash32) (*bitcoin.Hash32, int)
 	GetLocatorHashes(ctx context.Context, max int) ([]bitcoin.Hash32, error)
 	GetVerifyOnlyLocatorHashes(ctx context.Context) ([]bitcoin.Hash32, error)

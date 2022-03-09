@@ -564,7 +564,7 @@ func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 	return blockHeight, isLongest, nil
 }
 
-// Header returns the header header at the specified height on the longest POW chain.
+// Header returns the header at the specified height on the longest POW chain.
 func (repo *Repository) Header(ctx context.Context, height int) (*wire.BlockHeader, error) {
 	repo.Lock()
 	defer repo.Unlock()
@@ -1024,6 +1024,7 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 	indexData, err := repo.store.Read(ctx, indexPath)
 	if err != nil {
 		if errors.Cause(err) == storage.ErrNotFound {
+			logger.Info(ctx, "No header branches found to load")
 			return repo.initializeWithGenesis()
 		}
 		return errors.Wrap(err, "read index")

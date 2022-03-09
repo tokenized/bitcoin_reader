@@ -60,6 +60,10 @@ func (m *MockHeaderRepository) LastHash() bitcoin.Hash32 {
 	return m.lastHash
 }
 
+func (m *MockHeaderRepository) LastTime() uint32 {
+	return 0
+}
+
 func (m *MockHeaderRepository) PreviousHash(hash bitcoin.Hash32) (*bitcoin.Hash32, int) {
 	return nil, -1
 }

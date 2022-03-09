@@ -540,7 +540,8 @@ func (n *BitcoinNode) handleTx(ctx context.Context, header *wire.MessageHeader,
 	n.Unlock()
 
 	if txManager == nil {
-		return nil // remaining message data will be discarded by deferred discard above
+		DiscardInput(r, header.Length)
+		return nil
 	}
 
 	counter := threads.NewWriteCounter()
