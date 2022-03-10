@@ -165,10 +165,19 @@ func main() {
 	// Blocking main and waiting for shutdown.
 	select {
 	case <-managerComplete:
+		logger.Warn(ctx, "Finished: Manager")
+
 	case <-saveComplete:
+		logger.Warn(ctx, "Finished: Save")
+
 	case <-cleanTxsComplete:
+		logger.Warn(ctx, "Finished: Clean Txs")
+
 	case <-processTxComplete:
+		logger.Warn(ctx, "Finished: Process Txs")
+
 	// case <-processBlocksComplete:
+	// logger.Warn(ctx, "Finished: Process Blocks")
 
 	case <-osSignals:
 		logger.Info(ctx, "Shutdown requested")

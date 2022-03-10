@@ -326,14 +326,28 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 
 	// Wait for interrupt or a thread to stop
 	select {
-	case <-interrupt:
 	case <-monitorHeadersComplete:
+		logger.Warn(ctx, "Finished: Monitor Headers")
+
 	case <-checkHeadersComplete:
+		logger.Warn(ctx, "Finished: Check Headers")
+
 	case <-cleanComplete:
+		logger.Warn(ctx, "Finished: Clean")
+
 	case <-statusComplete:
+		logger.Warn(ctx, "Finished: Status")
+
 	case <-requestTxsComplete:
+		logger.Warn(ctx, "Finished: Request Txs")
+
 	case <-findComplete:
+		logger.Warn(ctx, "Finished: Find")
+
 	case <-scanComplete:
+		logger.Warn(ctx, "Finished: Scan")
+
+	case <-interrupt:
 	}
 
 	// Stop the remaining threads. This also calls NodeManager.Stop.
