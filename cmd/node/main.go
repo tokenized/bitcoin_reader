@@ -48,7 +48,11 @@ func main() {
 	// ---------------------------------------------------------------------------------------------
 	// Storage
 
-	store := storage.CreateStorage("standalone", "./tmp/node", 5, 100)
+	store, err := storage.CreateStorage("standalone", "./tmp/node", 5, 100)
+	if err != nil {
+		logger.Fatal(ctx, "Failed to create storage : %s", err)
+	}
+
 	headers := headers.NewRepository(headers.DefaultConfig(), store)
 	peers := bitcoin_reader.NewPeerRepository(store, "")
 

@@ -260,6 +260,7 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 	}
 
 	if uint32(time.Now().Unix())-m.headers.LastTime() < 3600 {
+		logger.Info(ctx, "In Sync")
 		m.inSync = true
 	}
 
@@ -559,8 +560,9 @@ func (m *NodeManager) MonitorHeaders(ctx context.Context) error {
 
 			m.Lock()
 			if !m.inSync {
-				age := header.Timestamp - uint32(time.Now().Unix())
+				age := uint32(time.Now().Unix()) - header.Timestamp
 				if age < 3600 {
+					logger.Info(ctx, "In Sync")
 					m.inSync = true
 				}
 			}
