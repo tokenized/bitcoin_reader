@@ -669,6 +669,14 @@ func (repo *Repository) getData(ctx context.Context, file int) ([]*HeaderData, e
 	}
 	buf := bytes.NewReader(data)
 
+	var version uint8
+	if err := binary.Read(buf, endian, &version); err != nil {
+		return nil, errors.Wrap(err, "version")
+	}
+	if version != 1 {
+		return nil, fmt.Errorf("Wrong version : %d", version)
+	}
+
 	result := make([]*HeaderData, buf.Len()/headerDataSerializeSize)
 	for i := range result {
 		headerData := &HeaderData{}
@@ -863,9 +871,16 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "read : %s", path)
 		}
+		if data[0] != 1 {
+			return fmt.Errorf("Wrong version : %d", data[0])
+		}
 
 		if _, err := buf.Write(data[:currentFileByteOffset]); err != nil {
 			return errors.Wrap(err, "write first file start")
+		}
+	} else {
+		if err := binary.Write(buf, endian, headersVersion); err != nil {
+			return errors.Wrap(err, "version")
 		}
 	}
 
@@ -1025,7 +1040,7 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 	if err != nil {
 		if errors.Cause(err) == storage.ErrNotFound {
 			logger.Info(ctx, "No header branches found to load")
-			return repo.initializeWithGenesis()
+			return repo.migrate(ctx)
 		}
 		return errors.Wrap(err, "read index")
 	}
@@ -1076,6 +1091,143 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 		logger.Int("block_height", repo.longest.Height()),
 		logger.Stringer("block_hash", repo.longest.Last().Hash),
 	}, "Loaded headers")
+
+	return nil
+}
+
+// migrate creates a default branch from the old header data and converts the main branch header
+// files to the new format containing accumulated work. This supports migration from before branches
+// were supported.
+func (repo *Repository) migrate(ctx context.Context) error {
+	var branch *Branch
+
+	file := 0
+	height := 0
+	done := false
+
+	for {
+		headers, err := getOldData(ctx, repo.store, headersFilePath(file))
+		if err != nil {
+			logger.Info(ctx, "Could not get old header data for height %d : %s", height, err)
+			break
+		}
+
+		logger.InfoWithFields(ctx, []logger.Field{
+			logger.Int("file", file),
+		}, "Migrating old file")
+
+		for _, header := range headers {
+			if branch == nil {
+				branch, _ = NewBranch(nil, -1, header)
+				repo.longest = branch
+				repo.branches = Branches{repo.longest}
+			} else if !branch.Add(header) {
+				logger.InfoWithFields(ctx, []logger.Field{
+					logger.Stringer("previous_block_hash", header.PrevBlock),
+					logger.Stringer("block_hash", header.BlockHash()),
+					logger.Int("block_height", height),
+				}, "Could not add old header")
+				done = true
+				break
+			}
+			height++
+		}
+
+		if err := repo.saveNewFile(ctx, file, branch); err != nil {
+			return errors.Wrapf(err, "save new file %d", file)
+		}
+
+		if done {
+			break
+		}
+
+		if len(headers) != headersPerFile {
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.Int("file", file),
+				logger.Int("header_count", len(headers)),
+			}, "Header file not full")
+			break
+		}
+
+		file++
+	}
+
+	if branch == nil {
+		logger.Info(ctx, "Initializing headers with genesis")
+		return repo.initializeWithGenesis()
+	}
+
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Stringer("latest_block_hash", branch.Last().Hash),
+		logger.Int("latest_block_height", branch.Height()),
+	}, "Migrated headers")
+	return nil
+}
+
+func getOldData(ctx context.Context, store storage.Storage,
+	path string) ([]*wire.BlockHeader, error) {
+
+	data, err := store.Read(ctx, path)
+	if err != nil {
+		return nil, errors.Wrap(err, "read")
+	}
+	buf := bytes.NewReader(data)
+
+	var version uint8
+	if err := binary.Read(buf, endian, &version); err != nil {
+		return nil, errors.Wrap(err, "version")
+	}
+
+	if version != 0 {
+		return nil, fmt.Errorf("Unknown version : %d", version)
+	}
+
+	result := make([]*wire.BlockHeader, buf.Len()/80)
+	for i := range result {
+		headerData := &wire.BlockHeader{}
+		if err := headerData.Deserialize(buf); err != nil {
+			return nil, errors.Wrap(err, "deserialize")
+		}
+
+		result[i] = headerData
+	}
+
+	return result, nil
+}
+
+func (repo *Repository) saveNewFile(ctx context.Context, file int, branch *Branch) error {
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("file", file),
+	}, "Saving new file")
+
+	fileHeight := file * headersPerFile
+	nextFileHeight := fileHeight + headersPerFile
+	path := headersFilePath(file)
+
+	lastHeight := branch.Height()
+	if lastHeight < nextFileHeight {
+		nextFileHeight = lastHeight + 1
+	}
+
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, endian, headersVersion); err != nil {
+		return errors.Wrap(err, "version")
+	}
+
+	for height := fileHeight; height < nextFileHeight; height++ {
+		header := branch.AtHeight(height)
+		if header == nil {
+			return fmt.Errorf("Could not fetch header %d", height)
+		}
+
+		if err := header.Serialize(buf); err != nil {
+			return errors.Wrapf(err, "write header %d", height)
+		}
+	}
+
+	if err := repo.store.Write(ctx, path, buf.Bytes(), nil); err != nil {
+		return errors.Wrapf(err, "write : %s", path)
+	}
 
 	return nil
 }

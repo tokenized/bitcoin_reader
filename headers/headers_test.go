@@ -2,14 +2,17 @@ package headers
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/tokenized/bitcoin_reader/internal/platform/tests"
 	"github.com/tokenized/pkg/bitcoin"
+	"github.com/tokenized/pkg/logger"
 	"github.com/tokenized/pkg/storage"
+
+	"github.com/pkg/errors"
 )
 
 func Test_Headers_Clean(t *testing.T) {
@@ -17,7 +20,7 @@ func Test_Headers_Clean(t *testing.T) {
 	store := storage.NewMockStorage()
 	repo := NewRepository(DefaultConfig(), store)
 	repo.DisableDifficulty()
-	startTime := uint32(time.Now().Unix())
+	startTime := uint32(952644136)
 	repo.InitializeWithTimeStamp(startTime)
 
 	MockHeaders(ctx, repo, repo.LastHash(), startTime, 1100)
@@ -133,6 +136,14 @@ func Test_Headers_Clean(t *testing.T) {
 		t.Fatalf("Failed to read first headers file : %s", err)
 	}
 	buf := bytes.NewReader(data)
+	var version uint8
+	if err := binary.Read(buf, endian, &version); err != nil {
+		t.Fatalf("Failed to read version : %s", err)
+	}
+	if version != headersVersion {
+		t.Fatalf("Wrong version : got %d, want %d", version, headersVersion)
+	}
+
 	for i := 0; i < headersPerFile; i++ {
 		headerData := &HeaderData{}
 		if err := headerData.Deserialize(buf); err != nil {
@@ -140,7 +151,7 @@ func Test_Headers_Clean(t *testing.T) {
 		}
 
 		if !headerData.Hash.Equal(&longestHashes[i]) {
-			t.Errorf("Wrong hash at height %d : \ngot  : %s\nwant : %s", i, headerData.Hash,
+			t.Fatalf("Wrong hash at height %d : \ngot  : %s\nwant : %s", i, headerData.Hash,
 				longestHashes[i])
 		}
 	}
@@ -313,5 +324,119 @@ func Test_genesisHeaders(t *testing.T) {
 			testHash)
 	}
 	t.Logf("Test Genesis Hash : %s", test.BlockHash())
+}
 
+func Test_Headers_Load_empty(t *testing.T) {
+	ctx := tests.Context()
+	store := storage.NewMockStorage()
+	repo := NewRepository(DefaultConfig(), store)
+	if err := repo.Load(ctx); err != nil {
+		t.Fatalf("Failed to load repo : %s", err)
+	}
+}
+
+func Test_Headers_migrate(t *testing.T) {
+	ctx := tests.Context()
+	store := storage.NewMockStorage()
+	repo := NewRepository(DefaultConfig(), store)
+	repo.DisableDifficulty()
+
+	startTime := uint32(952644136)
+	repo.InitializeWithTimeStamp(startTime)
+	MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 5100)
+
+	t.Logf("Last header %d : %s", repo.Height(), repo.LastHash())
+
+	for file := 0; file < 6; file++ {
+		if err := saveOldFile(ctx, store, file, repo.longest); err != nil {
+			t.Fatalf("Failed to save old file %d : %s", file, err)
+		}
+	}
+
+	loadedRepo := NewRepository(DefaultConfig(), store)
+	if err := loadedRepo.Load(ctx); err != nil {
+		t.Fatalf("Failed to load repo : %s", err)
+	}
+
+	if repo.Height() != loadedRepo.Height() {
+		t.Errorf("Wrong loaded height : got %d, want %d", loadedRepo.Height(), repo.Height())
+	}
+
+	lastHash := repo.LastHash()
+	gotLastHash := loadedRepo.LastHash()
+	if !lastHash.Equal(&gotLastHash) {
+		t.Errorf("Wrong loaded last hash : got %s, want %s", loadedRepo.LastHash(), lastHash)
+	}
+}
+
+func saveOldFile(ctx context.Context, store storage.Storage, file int, branch *Branch) error {
+	fileHeight := file * headersPerFile
+	nextFileHeight := fileHeight + headersPerFile
+	path := headersFilePath(file)
+
+	lastHeight := branch.Height()
+	if lastHeight < nextFileHeight {
+		nextFileHeight = lastHeight + 1
+	}
+
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("file", file),
+		logger.Int("last_height", nextFileHeight-1),
+	}, "Saving old headers")
+
+	buf := &bytes.Buffer{}
+	if err := binary.Write(buf, endian, uint8(0)); err != nil {
+		return errors.Wrap(err, "version")
+	}
+
+	for height := fileHeight; height < nextFileHeight; height++ {
+		header := branch.AtHeight(height)
+		if header == nil {
+			return fmt.Errorf("Could not fetch header %d", height)
+		}
+
+		if err := header.Header.Serialize(buf); err != nil {
+			return errors.Wrapf(err, "write header %d", height)
+		}
+	}
+
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("file", file),
+		logger.Int("bytes", buf.Len()),
+	}, "File bytes")
+
+	if err := store.Write(ctx, path, buf.Bytes(), nil); err != nil {
+		return errors.Wrapf(err, "write : %s", path)
+	}
+
+	return nil
+}
+
+func Test_Headers_getOldData(t *testing.T) {
+	ctx := tests.Context()
+	store := storage.NewFilesystemStorage(storage.Config{
+		Bucket:     "",
+		Root:       "test_fixtures",
+		MaxRetries: 2,
+		RetryDelay: 1000,
+	})
+
+	path := headersFilePath(719)
+	t.Logf("Using path : %s", path)
+	headers, err := getOldData(ctx, store, path)
+	if err != nil {
+		t.Fatalf("Failed to get old data : %s", err)
+	}
+
+	if len(headers) != 1000 {
+		t.Errorf("Wrong headers count : got %d, want %d", len(headers), 1000)
+	}
+
+	t.Logf("Loaded %d headers", len(headers))
+
+	for i, header := range headers {
+		if i%100 == 0 {
+			t.Logf("Header %d : %s", i, header.BlockHash())
+		}
+	}
 }
