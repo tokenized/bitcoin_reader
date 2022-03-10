@@ -23,7 +23,7 @@ type TxProcessor interface {
 	ConfirmTx(ctx context.Context, txid bitcoin.Hash32, blockHeight int,
 		merkleProof *merkle_proof.MerkleProof) error
 
-	UpdateTxChainDepth(ctx context.Context, txid bitcoin.Hash32, chainDepth int) error
+	UpdateTxChainDepth(ctx context.Context, txid bitcoin.Hash32, chainDepth uint32) error
 
 	ProcessCoinbaseTx(ctx context.Context, blockHash bitcoin.Hash32, tx *wire.MsgTx) error
 }
