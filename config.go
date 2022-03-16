@@ -3,6 +3,7 @@ package bitcoin_reader
 import (
 	"time"
 
+	"github.com/tokenized/config"
 	"github.com/tokenized/pkg/bitcoin"
 )
 
@@ -10,7 +11,7 @@ type Config struct {
 	Network bitcoin.Network `default:"mainnet" json:"network" envconfig:"NETWORK"`
 
 	// Timeout is the amount of time a node will remain connected
-	Timeout time.Duration `default:"4h" json:"timeout" envconfig:"NODE_TIMEOUT"`
+	Timeout config.Duration `default:"4h" json:"timeout" envconfig:"NODE_TIMEOUT"`
 
 	// ScanCount is the number of peer addresses that will be scanned for valid peers when a scan is
 	// performed.
@@ -20,7 +21,7 @@ type Config struct {
 	TxRequestCount int `default:"10000" json:"tx_request_count" envconfig:"TX_REQUEST_COUNT"`
 
 	// StartupDelay delay after node manager startup before block processing will begin.
-	StartupDelay time.Duration `default:"1m" json:"startup_delay" envconfig:"STARTUP_DELAY"`
+	StartupDelay config.Duration `default:"1m" json:"startup_delay" envconfig:"STARTUP_DELAY"`
 
 	// ConcurrentBlockRequests is the number of concurrent block requests that will be attempted in
 	// case some of the requests are slow.
@@ -36,19 +37,19 @@ type Config struct {
 	// BlockRequestDelay is the delay between concurrent block requests. It should be long enough
 	// that small blocks will complete before the second request is made and only use concurrent
 	// requests for slow or large blocks.
-	BlockRequestDelay time.Duration `default:"5s" json:"block_request_delay" envconfig:"BLOCK_REQUEST_DELAY"`
+	BlockRequestDelay config.Duration `default:"5s" json:"block_request_delay" envconfig:"BLOCK_REQUEST_DELAY"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		Network:                 bitcoin.MainNet,
-		Timeout:                 time.Hour * 4,
+		Timeout:                 config.NewDuration(time.Hour * 4),
 		ScanCount:               1000,
 		TxRequestCount:          10000,
-		StartupDelay:            time.Minute,
+		StartupDelay:            config.NewDuration(time.Minute),
 		ConcurrentBlockRequests: 2,
 		DesiredNodeCount:        50,
 		StartBlockHeight:        700000,
-		BlockRequestDelay:       time.Second * 5,
+		BlockRequestDelay:       config.NewDuration(time.Second * 5),
 	}
 }

@@ -307,7 +307,7 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 		select {
 		case <-interrupt:
 			return nil
-		case <-time.After(m.config.StartupDelay):
+		case <-time.After(m.config.StartupDelay.Duration):
 			m.markStartupDelayComplete(ctx)
 			return nil
 		}
@@ -776,7 +776,7 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 		offset++
 
 		if previousTime, exists := m.previousPeers[peer.Address]; exists &&
-			time.Since(previousTime) < m.config.Timeout {
+			time.Since(previousTime) < m.config.Timeout.Duration {
 			logger.InfoWithFields(ctx, []logger.Field{
 				logger.String("address", peer.Address),
 				logger.Timestamp("previous_time", previousTime.UnixNano()),
@@ -861,12 +861,12 @@ func (m *NodeManager) Scan(ctx context.Context) error {
 		offset++
 
 		if previousTime, exists := m.previousPeers[peer.Address]; exists &&
-			time.Since(previousTime) < m.config.Timeout {
+			time.Since(previousTime) < m.config.Timeout.Duration {
 			continue
 		}
 
 		if previousTime, exists := m.scanningPeers[peer.Address]; exists &&
-			time.Since(previousTime) < m.config.Timeout {
+			time.Since(previousTime) < m.config.Timeout.Duration {
 			continue
 		}
 

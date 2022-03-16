@@ -381,7 +381,7 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	case <-readIncomingComplete:
 	case <-sendOutgoingComplete:
 	case <-pingComplete:
-	case <-time.After(n.config.Timeout):
+	case <-time.After(n.config.Timeout.Duration):
 		logger.Info(ctx, "Node reached timeout")
 	}
 

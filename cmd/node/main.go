@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokenized/bitcoin_reader"
 	"github.com/tokenized/bitcoin_reader/headers"
+	"github.com/tokenized/config"
 	"github.com/tokenized/pkg/bitcoin"
 	"github.com/tokenized/pkg/logger"
 	"github.com/tokenized/pkg/storage"
@@ -81,12 +82,12 @@ func main() {
 
 	nodeConfig := &bitcoin_reader.Config{
 		Network:                 bitcoin.MainNet,
-		Timeout:                 time.Hour,
+		Timeout:                 config.NewDuration(time.Hour),
 		ScanCount:               500,
-		StartupDelay:            time.Second * 20,
+		StartupDelay:            config.NewDuration(time.Second * 20),
 		ConcurrentBlockRequests: 2,
 		DesiredNodeCount:        50,
-		BlockRequestDelay:       time.Second * 5,
+		BlockRequestDelay:       config.NewDuration(time.Second * 5),
 	}
 	manager := bitcoin_reader.NewNodeManager(userAgent, nodeConfig, headers, peers)
 	managerThread := threads.NewThread("Node Manager", manager.Run)
