@@ -160,7 +160,10 @@ func Test_Headers_Clean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read second headers file : %s", err)
 	}
-	buf = bytes.NewReader(data)
+	if data[0] != 1 {
+		t.Fatalf("Wrong version %d", data[0])
+	}
+	buf = bytes.NewReader(data[1:])
 	for i := 1000; i < 1111; i++ {
 		headerData := &HeaderData{}
 		if err := headerData.Deserialize(buf); err != nil {

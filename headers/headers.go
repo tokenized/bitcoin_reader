@@ -863,19 +863,19 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 	fileHeight := file * headersPerFile
 	nextFileHeight := fileHeight + headersPerFile
 	path := headersFilePath(file)
-	currentFileByteOffset := (height - fileHeight) * headerDataSerializeSize
+	currentFileByteOffset := ((height - fileHeight) * headerDataSerializeSize)
 	buf := &bytes.Buffer{}
 
 	if currentFileByteOffset > 0 {
 		data, err := repo.store.Read(ctx, path)
 		if err != nil {
-			return errors.Wrapf(err, "read : %s", path)
+			return errors.Wrapf(err, "read: %s", path)
 		}
 		if data[0] != 1 {
-			return fmt.Errorf("Wrong version : %d", data[0])
+			return fmt.Errorf("Wrong version %d: %s", data[0], path)
 		}
 
-		if _, err := buf.Write(data[:currentFileByteOffset]); err != nil {
+		if _, err := buf.Write(data[:currentFileByteOffset+1]); err != nil {
 			return errors.Wrap(err, "write first file start")
 		}
 	} else {
@@ -892,7 +892,7 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 
 		if height == nextFileHeight {
 			if err := repo.store.Write(ctx, path, buf.Bytes(), nil); err != nil {
-				return errors.Wrapf(err, "write : %s", path)
+				return errors.Wrapf(err, "write: %s", path)
 			}
 
 			file++
@@ -900,12 +900,15 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 			nextFileHeight += headersPerFile
 			path = headersFilePath(file)
 			buf = &bytes.Buffer{}
+			if err := binary.Write(buf, endian, headersVersion); err != nil {
+				return errors.Wrap(err, "version")
+			}
 		}
 	}
 
 	if buf.Len() > 0 {
 		if err := repo.store.Write(ctx, path, buf.Bytes(), nil); err != nil {
-			return errors.Wrapf(err, "write : %s", path)
+			return errors.Wrapf(err, "write: %s", path)
 		}
 		file++
 		fileHeight = nextFileHeight

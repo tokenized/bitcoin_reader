@@ -399,6 +399,8 @@ func (bd *BlockDownloader) handleBlock(ctx context.Context, header *wire.BlockHe
 		return errBlockDownloadCancelled
 	}
 
+	// Don't process coinbase or confirms until after merkle root is verified, in case block is
+	// malicious and the wrong txs are provided.
 	if err := bd.txProcessor.ProcessCoinbaseTx(ctx, hash, coinbaseTx); err != nil {
 		return errors.Wrap(err, "process coinbase tx")
 	}
