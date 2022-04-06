@@ -37,7 +37,7 @@ type Config struct {
 	// BlockRequestDelay is the delay between concurrent block requests. It should be long enough
 	// that small blocks will complete before the second request is made and only use concurrent
 	// requests for slow or large blocks.
-	BlockRequestDelay config.Duration `default:"5s" json:"block_request_delay" envconfig:"BLOCK_REQUEST_DELAY"`
+	BlockRequestDelay config.Duration `default:"30s" json:"block_request_delay" envconfig:"BLOCK_REQUEST_DELAY"`
 }
 
 func DefaultConfig() *Config {

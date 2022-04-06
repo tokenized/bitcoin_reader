@@ -34,12 +34,11 @@ type BlockDownloader struct {
 	Started  chan interface{}
 	Complete chan error
 
-	cancelLock sync.Mutex
-	cancelled  bool
-	isStarted  bool
-	canceller  BlockRequestCanceller
-
-	onComplete OnComplete
+	stateLock   sync.Mutex
+	isCancelled bool
+	isStarted   bool
+	isComplete  bool
+	canceller   BlockRequestCanceller
 
 	err error
 
@@ -47,24 +46,23 @@ type BlockDownloader struct {
 }
 
 func NewBlockDownloader(txProcessor TxProcessor, blockTxManager BlockTxManager, hash bitcoin.Hash32,
-	height int, onComplete OnComplete) *BlockDownloader {
+	height int) *BlockDownloader {
 
 	return &BlockDownloader{
 		hash:           hash,
 		height:         height,
-		onComplete:     onComplete,
 		txProcessor:    txProcessor,
 		blockTxManager: blockTxManager,
-		Started:        make(chan interface{}, 1),
-		Complete:       make(chan error, 1),
+		Started:        make(chan interface{}, 2),
+		Complete:       make(chan error, 2),
 	}
 }
 
 func (bd *BlockDownloader) SetCanceller(id uuid.UUID, canceller BlockRequestCanceller) {
-	bd.cancelLock.Lock()
+	bd.stateLock.Lock()
 	bd.requesterID = id
 	bd.canceller = canceller
-	bd.cancelLock.Unlock()
+	bd.stateLock.Unlock()
 }
 
 func (bd *BlockDownloader) ID() uuid.UUID {
@@ -108,6 +106,7 @@ func (bd *BlockDownloader) Error() error {
 }
 
 func (bd *BlockDownloader) Run(ctx context.Context, interrupt <-chan interface{}) error {
+	start := time.Now()
 	hash := bd.Hash()
 	height := bd.Height()
 	ctx = logger.ContextWithLogFields(ctx,
@@ -118,61 +117,59 @@ func (bd *BlockDownloader) Run(ctx context.Context, interrupt <-chan interface{}
 	// Wait for download to start
 	select {
 	case <-interrupt:
-		bd.CancelAndWaitForComplete(ctx)
+		bd.cancelAndWaitForComplete(ctx)
 		return threads.Interrupted
 
 	case <-bd.Started:
-		bd.cancelLock.Lock()
+		bd.stateLock.Lock()
 		bd.isStarted = true
-		bd.cancelLock.Unlock()
+		bd.stateLock.Unlock()
 
-	case <-time.After(time.Minute):
-		logger.Warn(ctx, "Block request timed out")
-		bd.CancelAndWaitForComplete(ctx)
+	// We must start receiving the block before this time, otherwise it is a slow node or the node
+	// is ignoring our request.
+	case <-time.After(2 * time.Minute):
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+		}, "Block request timed out")
+		bd.cancelAndWaitForComplete(ctx)
 		return ErrTimeout
 
 	case err := <-bd.Complete:
+		bd.stateLock.Lock()
+		bd.isComplete = true
+		bd.stateLock.Unlock()
 		if err != nil && errors.Cause(err) != errBlockDownloadCancelled {
 			logger.Warn(ctx, "Block download failed : %s", err)
 		}
 
-		if bd.onComplete != nil {
-			bd.onComplete(ctx, bd, err)
-		}
-		if IsCloseError(err) || errors.Cause(err) == errBlockDownloadCancelled {
-			return nil
-		}
 		return err
 	}
 
 	// Wait for completion
 	select {
 	case <-interrupt:
-		bd.CancelAndWaitForComplete(ctx)
+		bd.cancelAndWaitForComplete(ctx)
 		return threads.Interrupted
 
 	case <-time.After(time.Hour):
-		logger.Warn(ctx, "Block download timed out")
-		bd.CancelAndWaitForComplete(ctx)
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+		}, "Block download timed out")
 		return ErrTimeout
 
 	case err := <-bd.Complete:
+		bd.stateLock.Lock()
+		bd.isComplete = true
+		bd.stateLock.Unlock()
 		if err != nil && !IsCloseError(err) && errors.Cause(err) != errBlockDownloadCancelled {
 			logger.Warn(ctx, "Block download failed : %s", err)
 		}
 
-		if bd.onComplete != nil {
-			bd.onComplete(ctx, bd, err)
-		}
-
-		if IsCloseError(err) || errors.Cause(err) == errBlockDownloadCancelled {
-			return nil
-		}
 		return err
 	}
 }
 
-func (bd *BlockDownloader) CancelAndWaitForComplete(ctx context.Context) {
+func (bd *BlockDownloader) cancelAndWaitForComplete(ctx context.Context) {
 	bd.Cancel(ctx)
 
 	count := 0
@@ -187,9 +184,6 @@ func (bd *BlockDownloader) CancelAndWaitForComplete(ctx context.Context) {
 					logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
 				}, "Block cancel timed out")
 
-				if bd.onComplete != nil {
-					bd.onComplete(ctx, bd, errBlockDownloadCancelled)
-				}
 				return
 			}
 
@@ -198,13 +192,13 @@ func (bd *BlockDownloader) CancelAndWaitForComplete(ctx context.Context) {
 			}, "Waiting for block download cancel")
 
 		case err := <-bd.Complete:
+			bd.stateLock.Lock()
+			bd.isComplete = true
+			bd.stateLock.Unlock()
 			if err != nil && errors.Cause(err) != errBlockDownloadCancelled {
 				logger.Warn(ctx, "Block download failed : %s", err)
 			}
 
-			if bd.onComplete != nil {
-				bd.onComplete(ctx, bd, err)
-			}
 			return
 		}
 	}
@@ -215,13 +209,23 @@ func (bd *BlockDownloader) Stop(ctx context.Context) {
 
 	isStarted := true
 	wasStopped := false
-	bd.cancelLock.Lock()
-	if !bd.cancelled {
+	bd.stateLock.Lock()
+	if bd.isComplete {
+		bd.stateLock.Unlock()
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.Stringer("connection", bd.RequesterID()),
+			logger.Stringer("block_hash", hash),
+			logger.Int("block_height", bd.Height()),
+		}, "Stopping block download that already completed")
+		return
+	}
+
+	if !bd.isCancelled {
 		isStarted = bd.isStarted
 		wasStopped = true
 	}
-	bd.cancelled = true
-	bd.cancelLock.Unlock()
+	bd.isCancelled = true
+	bd.stateLock.Unlock()
 
 	if !isStarted {
 		logger.InfoWithFields(ctx, []logger.Field{
@@ -249,66 +253,70 @@ func (bd *BlockDownloader) Cancel(ctx context.Context) {
 		logger.Stringer("block_hash", hash),
 		logger.Int("block_height", bd.Height()))
 
-	signalComplete := false // default to not signalling complete
-	signalStarted := false  // default to not signalling started
-	bd.cancelLock.Lock()
-	if !bd.cancelled {
+	sendComplete := false // default to not sending complete signal
+	sendStarted := false  // default to not sending started signal
+	bd.stateLock.Lock()
+	if bd.isComplete {
+		bd.stateLock.Unlock()
+		logger.Warn(ctx, "Attempted cancel of block download that was already complete")
+		return
+	}
+
+	if !bd.isCancelled {
 		if bd.canceller != nil {
 			alreadyStarted := bd.canceller.CancelBlockRequest(ctx, hash) // Cancel at connection
 			if !alreadyStarted {
-				signalComplete = true
+				sendComplete = true
 			}
 		}
 		if !bd.isStarted {
-			signalStarted = true
+			sendStarted = true
 		}
 		logger.InfoWithFields(ctx, []logger.Field{
-			logger.Bool("signal_complete", signalComplete),
-			logger.Bool("signal_started", signalStarted),
+			logger.Bool("send_complete", sendComplete),
+			logger.Bool("send_started", sendStarted),
 			logger.Bool("has_canceller", bd.canceller != nil),
 		}, "Cancelled block download with canceller")
 	}
-	bd.cancelled = true
-	bd.cancelLock.Unlock()
+	bd.isCancelled = true
+	bd.stateLock.Unlock()
 
-	if signalStarted {
+	if sendStarted {
 		// Trigger the "Started" select in "Run".
-		waitWarning := logger.NewWaitingWarning(ctx, time.Second, "Signaling started")
 		bd.Started <- true
-		waitWarning.Cancel()
 	}
-	if signalComplete {
+	if sendComplete {
 		// The handler function doesn't need to be waited for so just trigger the "Complete" select
 		// in "Run".
-		waitWarning := logger.NewWaitingWarning(ctx, time.Second, "Signaling complete")
 		bd.Complete <- errBlockDownloadCancelled
-		waitWarning.Cancel()
 	}
 }
 
-func (bd *BlockDownloader) isCancelled() bool {
-	bd.cancelLock.Lock()
-	result := bd.cancelled
-	bd.cancelLock.Unlock()
+func (bd *BlockDownloader) wasCancelled() bool {
+	bd.stateLock.Lock()
+	result := bd.isCancelled
+	bd.stateLock.Unlock()
 	return result
 }
 
 func (bd *BlockDownloader) HandleBlock(ctx context.Context, header *wire.BlockHeader,
 	txCount uint64, txChannel <-chan *wire.MsgTx) error {
 
+	hash := *header.BlockHash()
+	bd.Started <- hash
+
 	ctx = logger.ContextWithLogFields(ctx,
 		logger.Stringer("connection", bd.RequesterID()),
 		logger.Stringer("block_hash", bd.Hash()),
 		logger.Int("block_height", bd.Height()))
 
-	if bd.isCancelled() {
-		logger.Info(ctx, "Block download handler called for cancelled block")
+	if bd.wasCancelled() {
+		logger.Warn(ctx, "Block download handler called for cancelled block")
 		bd.Complete <- errBlockDownloadCancelled
 		return errBlockDownloadCancelled
 	}
 
 	requestedHash := bd.Hash()
-	hash := *header.BlockHash()
 
 	// Verify this is the correct block
 	if !requestedHash.Equal(&hash) {
@@ -318,8 +326,6 @@ func (bd *BlockDownloader) HandleBlock(ctx context.Context, header *wire.BlockHe
 		bd.Complete <- errors.Wrap(ErrWrongBlock, hash.String())
 		return nil
 	}
-
-	bd.Started <- hash
 
 	err := bd.handleBlock(ctx, header, txCount, txChannel)
 	if err != nil && errors.Cause(err) != errBlockDownloadCancelled {
@@ -366,7 +372,7 @@ func (bd *BlockDownloader) handleBlock(ctx context.Context, header *wire.BlockHe
 
 		merkleTree.AddHash(txid)
 
-		if bd.isCancelled() {
+		if bd.wasCancelled() {
 			for range txChannel { // flush channel
 			}
 			return errBlockDownloadCancelled
@@ -395,7 +401,7 @@ func (bd *BlockDownloader) handleBlock(ctx context.Context, header *wire.BlockHe
 			len(blockTxIDs))
 	}
 
-	if bd.isCancelled() {
+	if bd.wasCancelled() {
 		return errBlockDownloadCancelled
 	}
 

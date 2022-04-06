@@ -32,10 +32,9 @@ type BlockManager struct {
 
 	currentHash       bitcoin.Hash32
 	currentIsComplete bool
-	currentComplete   chan error
+	currentComplete   chan interface{}
 	currentLock       sync.Mutex
 
-	wait sync.WaitGroup
 	sync.Mutex
 }
 
@@ -48,7 +47,7 @@ type downloadRequest struct {
 	hash      bitcoin.Hash32
 	height    int
 	processor TxProcessor
-	complete  chan error
+	complete  chan interface{}
 }
 
 func NewBlockManager(blockTxManager BlockTxManager, requestor BlockRequestor,
@@ -59,19 +58,18 @@ func NewBlockManager(blockTxManager BlockTxManager, requestor BlockRequestor,
 		requestor:               requestor,
 		concurrentBlockRequests: concurrentBlockRequests,
 		blockRequestDelay:       blockRequestDelay,
-		currentComplete:         make(chan error),
 		requests:                make(chan *downloadRequest, 10),
 	}
 }
 
 func (m *BlockManager) AddRequest(ctx context.Context, hash bitcoin.Hash32, height int,
-	processor TxProcessor) <-chan error {
+	processor TxProcessor) <-chan interface{} {
 
 	request := &downloadRequest{
 		hash:      hash,
 		height:    height,
 		processor: processor,
-		complete:  make(chan error),
+		complete:  make(chan interface{}),
 	}
 
 	m.requestLock.Lock()
@@ -85,29 +83,35 @@ func (m *BlockManager) AddRequest(ctx context.Context, hash bitcoin.Hash32, heig
 	return request.complete
 }
 
+func (m *BlockManager) close(blockInterrupt chan<- interface{}) {
+	close(blockInterrupt)
+
+	m.requestLock.Lock()
+	m.requestsClosed = true
+	close(m.requests)
+	m.requestLock.Unlock()
+}
+
 func (m *BlockManager) Run(ctx context.Context, interrupt <-chan interface{}) error {
 	defer func() {
 		m.Stop(ctx)
-		waitWarning := logger.NewWaitingWarning(ctx, 3*time.Second, "Block Manager Shutdown")
-		m.wait.Wait()
-		waitWarning.Cancel()
+		m.shutdown(ctx)
 	}()
 
+	abortInterrupt := make(chan interface{})
 	blockInterrupt := make(chan interface{})
 	go func() {
 		select {
+		case <-abortInterrupt:
+			m.close(blockInterrupt)
 		case <-interrupt:
-			close(blockInterrupt)
-
-			m.requestLock.Lock()
-			m.requestsClosed = true
-			close(m.requests)
-			m.requestLock.Unlock()
+			m.close(blockInterrupt)
 		}
 	}()
 
 	for request := range m.requests {
 		if err := m.processRequest(ctx, request, blockInterrupt); err != nil {
+			close(abortInterrupt)
 			for range m.requests { // flush channel
 			}
 
@@ -116,27 +120,81 @@ func (m *BlockManager) Run(ctx context.Context, interrupt <-chan interface{}) er
 			}
 
 			logger.Error(ctx, "Failed to process request : %s", err)
-			return err
+			return errors.Wrap(err, "process request")
 		}
 	}
 
 	return nil
 }
 
+func (m *BlockManager) Stop(ctx context.Context) {
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("downloader_count", len(m.downloaders)),
+	}, "Stopping block manager")
+
+	m.downloaderLock.Lock()
+	downloaders := make([]*downloadThread, len(m.downloaders))
+	copy(downloaders, m.downloaders)
+	m.downloaderLock.Unlock()
+
+	for _, dt := range downloaders {
+		dt.downloader.Cancel(ctx)
+		dt.thread.Stop(ctx)
+	}
+}
+
+func (m *BlockManager) shutdown(ctx context.Context) {
+	start := time.Now()
+	count := 0
+	for {
+		m.downloaderLock.Lock()
+		activeCount := len(m.downloaders)
+		if count >= 30 {
+			for _, dt := range m.downloaders {
+				logger.WarnWithFields(ctx, []logger.Field{
+					logger.Stringer("connection", dt.downloader.RequesterID()),
+					logger.Stringer("block_hash", dt.downloader.Hash()),
+					logger.Int("block_height", dt.downloader.Height()),
+				}, "Waiting for: Block Downloader Shutdown")
+			}
+		}
+		m.downloaderLock.Unlock()
+
+		if activeCount == 0 {
+			logger.Info(ctx, "Finished Block Manager")
+			return
+		}
+
+		if count >= 30 {
+			logger.WarnWithFields(ctx, []logger.Field{
+				logger.Timestamp("start", start.UnixNano()),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+				logger.Int("active_downloaders", activeCount),
+			}, "Waiting for: Block Manager Shutdown")
+			count = 0
+		}
+
+		count++
+		time.Sleep(time.Millisecond * 100)
+	}
+}
+
 func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequest,
 	interrupt <-chan interface{}) error {
 
-	ctx = logger.ContextWithLogFields(ctx,
-		logger.Stringer("block_hash", request.hash),
+	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("block_hash", request.hash),
 		logger.Int("block_height", request.height))
+
+	logger.Verbose(ctx, "Starting block request")
 
 	m.currentLock.Lock()
 	m.currentHash = request.hash
 	m.currentIsComplete = false
+	m.currentComplete = make(chan interface{})
 	m.currentLock.Unlock()
 
 	// Send initial block request.
-	countSinceRequest := 0
+	countWithoutActiveDownload := 0
 	if err := m.requestBlock(ctx, request.hash, request.height, request.processor); err != nil {
 		logger.Warn(ctx, "Failed to request block : %s", err)
 	}
@@ -145,11 +203,16 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 	for {
 		select {
 		case <-time.After(m.blockRequestDelay): // most blocks finish within 5 seconds
-			activeDownloadCount := m.DownloaderCount(request.hash)
+			downloaders := m.Downloaders(request.hash)
 			logger.VerboseWithFields(ctx, []logger.Field{
-				logger.Int("active_downloads", activeDownloadCount),
+				logger.Stringers("active_downloads", downloaders),
 			}, "Active downloads")
-			countSinceRequest++
+			activeDownloadCount := len(downloaders)
+			if activeDownloadCount > 0 {
+				countWithoutActiveDownload = 0
+			} else {
+				countWithoutActiveDownload++
+			}
 
 			if activeDownloadCount < m.concurrentBlockRequests {
 				if err := m.requestBlock(ctx, request.hash, request.height,
@@ -157,21 +220,19 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 					logger.Warn(ctx, "Failed to request block : %s", err)
 				} else {
 					activeDownloadCount++
-					countSinceRequest = 0
 				}
 			}
 
-			if countSinceRequest > 20 && activeDownloadCount < m.concurrentBlockRequests {
+			if countWithoutActiveDownload > 20 {
 				return ErrNodeNotAvailable
 			}
 
 		case <-interrupt:
 			return threads.Interrupted
 
-		case err := <-m.currentComplete:
-			logger.Verbose(ctx, "Completed block")
-			m.stopBlock(ctx, request.hash) // stop any others still downloading
-			request.complete <- err
+		case <-m.currentComplete:
+			m.cancelDownloaders(ctx, request.hash) // stop any others still downloading
+			close(request.complete)
 			return nil
 		}
 	}
@@ -180,8 +241,8 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 func (m *BlockManager) DownloaderCount(hash bitcoin.Hash32) int {
 	result := 0
 	m.downloaderLock.Lock()
-	for _, d := range m.downloaders {
-		dh := d.downloader.Hash()
+	for _, dt := range m.downloaders {
+		dh := dt.downloader.Hash()
 		if hash.Equal(&dh) {
 			result++
 		}
@@ -190,104 +251,139 @@ func (m *BlockManager) DownloaderCount(hash bitcoin.Hash32) int {
 	return result
 }
 
-func (m *BlockManager) Stop(ctx context.Context) {
+func (m *BlockManager) Downloaders(hash bitcoin.Hash32) []fmt.Stringer {
+	var result []fmt.Stringer
 	m.downloaderLock.Lock()
-	logger.InfoWithFields(ctx, []logger.Field{
-		logger.Int("downloader_count", len(m.downloaders)),
-	}, "Stopping downloaders")
-	for _, d := range m.downloaders {
-		d.downloader.Cancel(ctx)
-		d.thread.Stop(ctx)
-	}
-	m.downloaderLock.Unlock()
-}
-
-func (m *BlockManager) stopBlock(ctx context.Context, hash bitcoin.Hash32) {
-	m.downloaderLock.Lock()
-	for _, d := range m.downloaders {
-		dh := d.downloader.Hash()
+	for _, dt := range m.downloaders {
+		dh := dt.downloader.Hash()
 		if hash.Equal(&dh) {
-			d.downloader.Cancel(ctx)
-			d.thread.Stop(ctx)
+			result = append(result, dt.downloader.RequesterID())
 		}
 	}
 	m.downloaderLock.Unlock()
+	return result
+}
+
+func (m *BlockManager) cancelDownloaders(ctx context.Context, hash bitcoin.Hash32) {
+	m.downloaderLock.Lock()
+	downloaders := make([]*downloadThread, len(m.downloaders))
+	copy(downloaders, m.downloaders)
+	m.downloaderLock.Unlock()
+
+	for _, dt := range downloaders {
+		dh := dt.downloader.Hash()
+		if hash.Equal(&dh) {
+			logger.VerboseWithFields(ctx, []logger.Field{
+				logger.Stringer("connection", dt.downloader.RequesterID()),
+				logger.Stringer("block_hash", dt.downloader.Hash()),
+				logger.Int("block_height", dt.downloader.Height()),
+			}, "Cancelling block downloader")
+			dt.downloader.Cancel(ctx)
+			dt.thread.Stop(ctx)
+		}
+	}
 }
 
 func (m *BlockManager) requestBlock(ctx context.Context, hash bitcoin.Hash32, height int,
 	processor TxProcessor) error {
 
-	downloader := NewBlockDownloader(processor, m.blockTxManager, hash, height,
-		m.DownloaderCompleted)
+	logger.Verbose(ctx, "Creating block request")
+	downloader := NewBlockDownloader(processor, m.blockTxManager, hash, height)
 
 	node, err := m.requestor.RequestBlock(ctx, hash, downloader.HandleBlock, downloader.Stop)
 	if err != nil {
 		return err
 	}
 
-	downloader.SetCanceller(node.ID(), node)
+	nodeID := node.ID()
+	downloader.SetCanceller(nodeID, node)
 
 	dt := &downloadThread{
 		downloader: downloader,
 		thread:     threads.NewThread(fmt.Sprintf("Download Block: %s", hash), downloader.Run),
 	}
-	dt.thread.SetWait(&m.wait)
+	df := &downloadFinisher{
+		manager:    m,
+		downloader: downloader,
+	}
+	dt.thread.SetOnComplete(df.onDownloaderCompleted)
 
 	m.downloaderLock.Lock()
 	m.downloaders = append(m.downloaders, dt)
 	m.downloaderLock.Unlock()
 
 	// Start download thread
-	dt.thread.Start(ctx)
+	dt.thread.Start(logger.ContextWithLogFields(ctx, logger.Stringer("connection", nodeID)))
 	return nil
 }
 
-func (m *BlockManager) DownloaderCompleted(ctx context.Context, downloader *BlockDownloader,
-	err error) {
-
+func (m *BlockManager) removeDownloader(ctx context.Context, downloader *BlockDownloader) {
 	m.downloaderLock.Lock()
 	for i, dt := range m.downloaders {
 		if dt.downloader == downloader {
 			m.downloaders = append(m.downloaders[:i], m.downloaders[i+1:]...)
-			break
+			m.downloaderLock.Unlock()
+			return
 		}
 	}
+
+	logger.Warn(ctx, "Block downloader not found to remove")
 	m.downloaderLock.Unlock()
-
-	hash := downloader.Hash()
-
-	// Update status of block
-	if err == nil {
-		m.currentLock.Lock()
-		if hash.Equal(&m.currentHash) {
-			if !m.currentIsComplete {
-				m.currentIsComplete = true
-				m.currentComplete <- nil
-			}
-		}
-		m.currentLock.Unlock()
-		return
-	}
-
-	if errors.Cause(err) == threads.Interrupted || errors.Cause(err) == errBlockDownloadCancelled {
-		return
-	}
-
-	logger.WarnWithFields(ctx, []logger.Field{
-		logger.Stringer("block_hash", downloader.Hash()),
-		logger.Int("block_height", downloader.Height()),
-	}, "Block download failed with error : %s", err)
 }
 
-func (m *BlockManager) CancelDownloaders(ctx context.Context, hash bitcoin.Hash32) {
-	m.downloaderLock.Lock()
-	defer m.downloaderLock.Unlock()
+func (m *BlockManager) markBlockRequestComplete(ctx context.Context, hash bitcoin.Hash32) {
+	// Update status of block request
+	m.currentLock.Lock()
+	defer m.currentLock.Unlock()
 
-	for _, dt := range m.downloaders {
-		hash := dt.downloader.Hash()
-		if hash.Equal(&hash) {
-			dt.downloader.Cancel(ctx)
-			dt.thread.Stop(ctx)
-		}
+	if !hash.Equal(&m.currentHash) {
+		logger.Verbose(ctx, "Block not currently active")
+		return
 	}
+
+	if m.currentIsComplete {
+		logger.Verbose(ctx, "Block already marked complete")
+		return
+	}
+
+	m.currentIsComplete = true
+	close(m.currentComplete)
+	logger.Verbose(ctx, "Block marked complete")
+}
+
+type downloadFinisher struct {
+	manager    *BlockManager
+	downloader *BlockDownloader
+}
+
+func (c *downloadFinisher) onDownloaderCompleted(ctx context.Context, err error) {
+	hash := c.downloader.Hash()
+	ctx = logger.ContextWithLogFields(ctx,
+		logger.Stringer("connection", c.downloader.RequesterID()),
+		logger.Stringer("block_hash", hash), logger.Int("block_height", c.downloader.Height()))
+	logger.Verbose(ctx, "Finishing downloader : %s", err)
+
+	c.manager.removeDownloader(ctx, c.downloader)
+
+	if err == nil {
+		c.manager.markBlockRequestComplete(ctx, hash)
+		return
+	}
+
+	if errors.Cause(err) == threads.Interrupted {
+		logger.Verbose(ctx, "Block download interrupted")
+		return
+	}
+
+	if errors.Cause(err) == errBlockDownloadCancelled {
+		logger.Verbose(ctx, "Block download cancelled")
+		return
+	}
+
+	if IsCloseError(err) {
+		logger.Verbose(ctx, "Block download aborted by remote node : %s", err)
+		return
+	}
+
+	logger.Warn(ctx, "Block download failed : %s", err)
 }

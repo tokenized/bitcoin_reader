@@ -266,7 +266,17 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 	}
 
 	if count == 0 {
-		logger.Verbose(ctx, "Zero headers provided")
+		n.Lock()
+		if len(n.lastHeaderRequest) == 0 {
+			logger.Warn(ctx, "Zero headers provided. Last requested header not known")
+		} else {
+			hash := n.lastHeaderRequest[len(n.lastHeaderRequest)-1]
+			n.lastHeaderHash = &hash
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.Stringer("last_header_hash", hash),
+			}, "Zero headers provided. Using last requested header")
+		}
+		n.Unlock()
 		return nil // remaining message data will be discarded by deferred discard above
 	}
 
@@ -308,7 +318,7 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 
 		if i == count-1 {
 			n.Lock()
-			n.lastHeader = blockHeader
+			n.lastHeaderHash = blockHeader.BlockHash()
 			n.Unlock()
 		}
 	}
@@ -332,7 +342,7 @@ func (n *BitcoinNode) handlePing(ctx context.Context, header *wire.MessageHeader
 		return errors.Wrap(err, "read message")
 	}
 
-	logger.Verbose(ctx, "Received ping 0x%16x", msg.Nonce)
+	logger.Debug(ctx, "Received ping 0x%16x", msg.Nonce)
 
 	// Send pong
 	if err := n.sendMessage(ctx, &wire.MsgPong{Nonce: msg.Nonce}); err != nil {
@@ -359,7 +369,7 @@ func (n *BitcoinNode) handlePong(ctx context.Context, header *wire.MessageHeader
 		return errors.New("Wrong pong nonce")
 	}
 
-	logger.Verbose(ctx, "Received pong 0x%16x (%f seconds)", msg.Nonce, time.Since(sent).Seconds())
+	logger.Debug(ctx, "Received pong 0x%16x (%f seconds)", msg.Nonce, time.Since(sent).Seconds())
 
 	return nil
 }
@@ -391,7 +401,7 @@ func (n *BitcoinNode) handleAddress(ctx context.Context, header *wire.MessageHea
 		return errors.Wrap(err, "read message")
 	}
 
-	logger.Verbose(ctx, "Received %d addresses", len(msg.AddrList))
+	logger.Debug(ctx, "Received %d addresses", len(msg.AddrList))
 	for _, address := range msg.AddrList {
 		n.peers.Add(ctx, fmt.Sprintf("[%s]:%d", address.IP.To16().String(), address.Port))
 	}
@@ -407,7 +417,7 @@ func (n *BitcoinNode) handleGetAddresses(ctx context.Context, header *wire.Messa
 		return errors.Wrap(err, "build addresses")
 	}
 
-	logger.Verbose(ctx, "Sending %d addresses", len(addresses.AddrList))
+	logger.Debug(ctx, "Sending %d addresses", len(addresses.AddrList))
 	if err := n.sendMessage(ctx, addresses); err != nil {
 		return errors.Wrap(err, "send addresses")
 	}
@@ -571,30 +581,63 @@ func (n *BitcoinNode) handleTx(ctx context.Context, header *wire.MessageHeader,
 	return nil
 }
 
+func discardBlock(ctx context.Context, header *wire.MessageHeader, r io.Reader,
+	counter *threads.WriteCounter, blockHash *bitcoin.Hash32) {
+
+	remaining := header.Length - counter.Count()
+	if remaining > 0 {
+		logger.InfoWithFields(ctx, []logger.Field{
+			logger.Stringer("block_hash", blockHash),
+			logger.Float64("block_size_mb", float64(header.Length)/1e6),
+			logger.Float64("remaining_mb", float64(remaining)/1e6),
+		}, "Discarding remaining block message")
+	}
+	DiscardInputWithCounter(r, header.Length, counter)
+	if remaining > 0 {
+		logger.InfoWithFields(ctx, []logger.Field{
+			logger.Stringer("block_hash", blockHash),
+			logger.Float64("block_size_mb", float64(header.Length)/1e6),
+			logger.Float64("remaining_mb", float64(remaining)/1e6),
+		}, "Finished discarding remaining block message")
+	}
+}
+
+func (n *BitcoinNode) completeBlock(ctx context.Context, blockHash *bitcoin.Hash32) {
+	n.Lock()
+	if n.blockRequest != nil && n.blockRequest.Equal(blockHash) {
+		n.requestTime = nil
+		n.blockRequest = nil
+		n.blockReader = nil
+		delete(n.handlers, wire.CmdBlock)
+		n.blockHandler = nil
+		n.blockOnStop = nil
+	} else {
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.Stringer("current_requested_block_hash", n.blockRequest),
+			logger.Stringer("receiving_block_hash", blockHash),
+		}, "Different block requested before previous block completed")
+	}
+	n.Unlock()
+}
+
 func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeader,
 	r io.Reader) error {
 
 	counter := threads.NewWriteCounter()
 	rc := io.TeeReader(r, counter)
-	defer func() {
-		remaining := header.Length - counter.Count()
-		if remaining > 0 {
-			logger.InfoWithFields(ctx, []logger.Field{
-				logger.Float64("block_size_mb", float64(header.Length)/1e6),
-				logger.Float64("remaining_mb", float64(remaining)/1e6),
-			}, "Discarding remaining block message")
-		}
-		DiscardInputWithCounter(r, header.Length, counter)
-	}()
 
 	blockHeader := &wire.BlockHeader{}
 	if err := blockHeader.Deserialize(rc); err != nil {
+		defer discardBlock(ctx, header, r, counter, nil)
 		return errors.Wrap(err, "header")
 	}
 	blockHash := blockHeader.BlockHash()
 
+	defer discardBlock(ctx, header, r, counter, blockHash)
+
+	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("block_hash", blockHash))
+
 	logger.InfoWithFields(ctx, []logger.Field{
-		logger.Stringer("block_hash", blockHash),
 		logger.Int("block_height", n.headers.HashHeight(*blockHash)),
 		logger.Float64("block_size_mb", float64(header.Length)/1e6),
 	}, "Receiving block")
@@ -605,32 +648,24 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 
 	if blockRequest == nil {
 		n.Unlock()
+		logger.Warn(ctx, "No block requested")
 		return nil // not a failure of the node because it could have been previously requested
 	}
 
 	if !blockRequest.Equal(blockHash) {
 		n.Unlock()
-		logger.InfoWithFields(ctx, []logger.Field{
+		logger.WarnWithFields(ctx, []logger.Field{
 			logger.Stringer("expected_block_hash", blockRequest),
-			logger.Stringer("received_block_hash", blockHash),
 		}, "Wrong Block Received")
 		return nil // not a failure of the node because it could have been previously requested
 	}
 
-	defer func() {
-		n.Lock()
-		n.requestTime = nil
-		n.blockRequest = nil
-		n.blockReader = nil
-		delete(n.handlers, wire.CmdBlock)
-		n.blockHandler = nil
-		n.blockOnStop = nil
-		n.Unlock()
-	}()
+	defer n.completeBlock(ctx, blockHash)
 
 	if blockHandler == nil {
 		// Block cancelled before it started downloading.
 		n.Unlock()
+		logger.Verbose(ctx, "Aborting block (no handler)")
 		return nil
 	}
 
@@ -642,7 +677,8 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 	// Read transaction count
 	txCount, err := wire.ReadVarInt(rb, wire.ProtocolVersion)
 	if err != nil {
-		return errors.Wrap(err, "read tx count")
+		logger.Verbose(ctx, "Aborting block (read tx count) : %s", err)
+		return errors.Wrap(errors.Wrap(err, blockHash.String()), "read tx count")
 	}
 
 	var wait sync.WaitGroup
@@ -660,7 +696,8 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 		if err := tx.Deserialize(rb); err != nil {
 			close(txChannel)
 			wait.Wait()
-			return errors.Wrapf(err, "read tx %d", i)
+			logger.Verbose(ctx, "Aborting block (read tx) : %s", err)
+			return errors.Wrapf(errors.Wrap(err, blockHash.String()), "read tx %d", i)
 		}
 
 		txChannel <- tx

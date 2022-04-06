@@ -39,8 +39,9 @@ type BitcoinNode struct {
 	headers HeaderRepository
 	peers   PeerRepository
 
-	connection     net.Conn // Connection to trusted full node
-	connectionLock sync.Mutex
+	connection              net.Conn // Connection to trusted full node
+	connectionClosedLocally bool
+	connectionLock          sync.Mutex
 	// IP             net.IP
 	// Port           uint16
 
@@ -49,14 +50,15 @@ type BitcoinNode struct {
 
 	handlers          MessageHandlers
 	headerHandler     MessageHandlerFunction
-	lastHeader        *wire.BlockHeader // last header received from the node
+	lastHeaderHash    *bitcoin.Hash32 // last header received from the node
 	lastHeaderRequest []bitcoin.Hash32
 
-	requestTime  *time.Time
-	blockRequest *bitcoin.Hash32
-	blockHandler HandleBlock
-	blockReader  io.ReadCloser
-	blockOnStop  OnStop
+	requestTime        *time.Time
+	blockRequest       *bitcoin.Hash32
+	blockHandler       HandleBlock
+	blockReader        io.ReadCloser
+	blockOnStop        OnStop
+	lastRequestedBlock *bitcoin.Hash32
 
 	txManager       *TxManager
 	txReceivedCount uint64
@@ -167,32 +169,45 @@ func (n *BitcoinNode) IsBusy() bool {
 	return n.requestTime != nil
 }
 
-func (n *BitcoinNode) LastHeader() *wire.BlockHeader {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.lastHeader
-}
-
 func (n *BitcoinNode) HasBlock(ctx context.Context, hash bitcoin.Hash32, height int) bool {
 	n.Lock()
-	lastHeader := n.lastHeader
+	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("connection", n.id))
+	lastRequestedBlock := n.lastRequestedBlock
+	lastHeaderHash := n.lastHeaderHash
 	n.Unlock()
 
-	if lastHeader == nil {
+	if lastRequestedBlock != nil && lastRequestedBlock.Equal(&hash) {
+		logger.Verbose(ctx, "Already requested block from this node")
+		return false // already requested this block and failed
+	}
+
+	if lastHeaderHash == nil {
+		logger.Verbose(ctx, "No headers to check block hash")
 		return false
 	}
 
-	lastHash := *lastHeader.BlockHash()
-	if lastHash.Equal(&hash) {
+	if lastHeaderHash.Equal(&hash) {
+		logger.Verbose(ctx, "Requested block is last header")
 		return true
 	}
 
-	lastHeight := n.headers.HashHeight(lastHash)
+	lastHeight := n.headers.HashHeight(*lastHeaderHash)
 	if lastHeight == -1 {
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.Stringer("last_hash", lastHeaderHash),
+		}, "Last header height not found")
 		return false // node's last header isn't in our chain
 	}
 
+	if lastHeight >= height {
+		logger.VerboseWithFields(ctx, []logger.Field{
+			logger.Int("last_height", lastHeight),
+		}, "Requested block is at or below node's last header")
+	} else {
+		logger.VerboseWithFields(ctx, []logger.Field{
+			logger.Int("last_height", lastHeight),
+		}, "Requested block is above node's last header")
+	}
 	return lastHeight >= height
 }
 
@@ -212,6 +227,7 @@ func (n *BitcoinNode) RequestBlock(ctx context.Context, hash bitcoin.Hash32, han
 	n.handlers[wire.CmdBlock] = n.handleBlock
 	n.blockHandler = handler
 	n.blockReader = nil
+	n.lastRequestedBlock = &hash
 	n.Unlock()
 
 	logger.InfoWithFields(ctx, []logger.Field{
@@ -237,7 +253,15 @@ func (n *BitcoinNode) CancelBlockRequest(ctx context.Context, hash bitcoin.Hash3
 	n.Lock()
 	defer n.Unlock()
 
-	if n.blockRequest == nil || !n.blockRequest.Equal(&hash) {
+	if n.blockRequest == nil {
+		logger.Warn(ctx, "Block request not found to cancel")
+		return false
+	}
+
+	if !n.blockRequest.Equal(&hash) {
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.Stringer("current_block_hash", n.blockRequest),
+		}, "Wrong block request found to cancel")
 		return false
 	}
 
@@ -247,12 +271,14 @@ func (n *BitcoinNode) CancelBlockRequest(ctx context.Context, hash bitcoin.Hash3
 		n.blockReader = nil
 		n.blockOnStop = nil
 		n.blockHandler = nil
+		logger.Info(ctx, "Cancelled in progress block")
 		return true
 	}
 
 	// Stop handling a block before it happens
 	n.blockOnStop = nil
 	n.blockHandler = nil
+	logger.Info(ctx, "Cancelled block request before download started")
 	return false
 }
 
@@ -266,7 +292,7 @@ func (n *BitcoinNode) RequestHeaders(ctx context.Context) error {
 	}
 	n.Unlock()
 
-	logger.Info(ctx, "Requesting headers")
+	logger.Verbose(ctx, "Requesting headers")
 	if err := n.sendHeaderRequest(ctx); err != nil {
 		return errors.Wrap(err, "send header request")
 	}
@@ -419,6 +445,7 @@ func (n *BitcoinNode) Stop(ctx context.Context) {
 	if n.connection != nil {
 		n.connection.Close()
 		n.connection = nil
+		n.connectionClosedLocally = true
 	}
 	n.connectionLock.Unlock()
 
@@ -602,7 +629,7 @@ func (n *BitcoinNode) sendPing(ctx context.Context) error {
 	n.pingNonce = nonce()
 	n.pingSent = time.Now()
 
-	logger.Verbose(ctx, "Sending ping 0x%16x", n.pingNonce)
+	logger.Debug(ctx, "Sending ping 0x%16x", n.pingNonce)
 	return n.sendMessage(ctx, wire.NewMsgPing(n.pingNonce))
 }
 

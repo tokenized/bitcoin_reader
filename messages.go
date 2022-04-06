@@ -57,15 +57,26 @@ func (n *BitcoinNode) readIncoming(ctx context.Context) error {
 	for {
 		n.connectionLock.Lock()
 		connection := n.connection
+		connectionClosedLocally := n.connectionClosedLocally
 		n.connectionLock.Unlock()
 
 		if connection == nil {
+			if !connectionClosedLocally {
+				logger.Info(ctx, "Connection closed remotely")
+			}
 			return nil // disconnected
 		}
 
 		if err := n.handleMessage(ctx, connection); err != nil {
 			if IsCloseError(err) {
-				logger.Info(ctx, "Disconnected : %s", err)
+				n.connectionLock.Lock()
+				connectionClosedLocally := n.connectionClosedLocally
+				n.connectionLock.Unlock()
+				if !connectionClosedLocally {
+					logger.Info(ctx, "Connection closed remotely : %s", err)
+				} else {
+					logger.Info(ctx, "Disconnected : %s", err)
+				}
 				return nil
 			} else {
 				return errors.Wrap(err, "handle message")

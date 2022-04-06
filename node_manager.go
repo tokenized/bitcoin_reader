@@ -117,6 +117,9 @@ func (m *NodeManager) RequestBlock(ctx context.Context, hash bitcoin.Hash32,
 		return nil, fmt.Errorf("Block not in headers : %s", hash)
 	}
 
+	ctx = logger.ContextWithLogFields(ctx, logger.String("task", "Request Block"),
+		logger.Stringer("block_hash", hash), logger.Int("block_height", height))
+
 	// inline function to access "hash" and "height" without a parameter in the predefined "hasData"
 	// function.
 	nodeHasBlock := func(ctx context.Context, node *BitcoinNode) bool {
@@ -135,6 +138,8 @@ func (m *NodeManager) RequestHeaders(ctx context.Context) error {
 	m.Lock()
 	defer m.Unlock()
 
+	ctx = logger.ContextWithLogFields(ctx, logger.String("task", "Request Headers"))
+
 	node := m.nextNode(ctx, nil)
 	if node == nil {
 		return nil
@@ -150,6 +155,8 @@ func (m *NodeManager) RequestTxs(ctx context.Context) error {
 	if m.txManager == nil {
 		return nil
 	}
+
+	ctx = logger.ContextWithLogFields(ctx, logger.String("task", "Request Transactions"))
 
 	node := m.nextNode(ctx, nil)
 	if node == nil {
@@ -192,10 +199,18 @@ func (m *NodeManager) nextNode(ctx context.Context, hasData NodeHasDataFunction)
 		return nil
 	}
 
+	var stoppedNodes []fmt.Stringer
+	var notReadyNodes []fmt.Stringer
+	var busyNodes []fmt.Stringer
 	looped := false
 	for {
 		if m.nextNodeOffset >= len(m.nodes) {
 			if looped {
+				logger.WarnWithFields(ctx, []logger.Field{
+					logger.Stringers("stopped", stoppedNodes),
+					logger.Stringers("not_ready", notReadyNodes),
+					logger.Stringers("busy", busyNodes),
+				}, "No nodes available")
 				return nil
 			}
 			m.nextNodeOffset = 0
@@ -203,11 +218,19 @@ func (m *NodeManager) nextNode(ctx context.Context, hasData NodeHasDataFunction)
 		}
 
 		if m.nodes[m.nextNodeOffset].node.IsStopped() {
+			stoppedNodes = append(stoppedNodes, m.nodes[m.nextNodeOffset].node.ID())
 			m.nodes = append(m.nodes[:m.nextNodeOffset], m.nodes[m.nextNodeOffset+1:]...)
 			continue
 		}
 
-		if !m.nodes[m.nextNodeOffset].node.IsReady() || m.nodes[m.nextNodeOffset].node.IsBusy() {
+		if !m.nodes[m.nextNodeOffset].node.IsReady() {
+			notReadyNodes = append(notReadyNodes, m.nodes[m.nextNodeOffset].node.ID())
+			m.nextNodeOffset++
+			continue
+		}
+
+		if m.nodes[m.nextNodeOffset].node.IsBusy() {
+			busyNodes = append(busyNodes, m.nodes[m.nextNodeOffset].node.ID())
 			m.nextNodeOffset++
 			continue
 		}
@@ -217,6 +240,12 @@ func (m *NodeManager) nextNode(ctx context.Context, hasData NodeHasDataFunction)
 			continue
 		}
 
+		logger.VerboseWithFields(ctx, []logger.Field{
+			logger.Stringers("stopped", stoppedNodes),
+			logger.Stringers("not_ready", notReadyNodes),
+			logger.Stringers("busy", busyNodes),
+			logger.Stringer("available", m.nodes[m.nextNodeOffset].node.ID()),
+		}, "Node available")
 		result := m.nodes[m.nextNodeOffset].node
 		m.nextNodeOffset++
 		return result
@@ -536,14 +565,9 @@ func (m *NodeManager) synchronizeBlocks(ctx context.Context, interrupt <-chan in
 		complete := blockManager.AddRequest(ctx, hash, height, m.blockTxProcessor)
 
 		select {
+		case <-complete:
 		case <-interrupt:
 			return threads.Interrupted
-
-		case err := <-complete:
-			if err != nil {
-				logger.Error(ctx, "Failed to process blocks : %s", err)
-				return err
-			}
 		}
 
 		height++
@@ -700,8 +724,11 @@ func (m *NodeManager) Status(ctx context.Context) error {
 	}
 	m.Unlock()
 
-	logger.Info(ctx, "%d/%d nodes ready (%d desired)", readyCount, totalCount,
-		m.config.DesiredNodeCount)
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("nodes_ready", readyCount),
+		logger.Int("nodes_total", totalCount),
+		logger.Int("nodes_desired", m.config.DesiredNodeCount),
+	}, "Node summary")
 
 	logger.InfoWithFields(ctx, []logger.Field{
 		logger.Uint64("tx_count", txCount),
@@ -745,10 +772,13 @@ func (m *NodeManager) getPeers(ctx context.Context, score int) (PeerList, error)
 		list = peers
 		m.peersLists[score] = list
 		if maxScore == -1 {
-			logger.Info(ctx, "Retrieved %d peers for score range %d and up", len(list), score)
+			logger.VerboseWithFields(ctx, []logger.Field{
+				logger.Int("peer_count", len(list)),
+			}, "Retrieved peers for score range %d and up", score)
 		} else {
-			logger.Info(ctx, "Retrieved %d peers for score range %d to %d", len(list), score,
-				maxScore)
+			logger.VerboseWithFields(ctx, []logger.Field{
+				logger.Int("peer_count", len(list)),
+			}, "Retrieved peers for score range %d to %d", score, maxScore)
 		}
 	}
 
@@ -768,7 +798,9 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 		return errors.Wrap(err, "get peers")
 	}
 
-	logger.Info(ctx, "%d peers for score %d", len(peers), score)
+	logger.VerboseWithFields(ctx, []logger.Field{
+		logger.Int("peer_count", len(peers)),
+	}, "Peers for score %d", score)
 
 	newNodes := 0
 	offset := 0
@@ -777,7 +809,7 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 
 		if previousTime, exists := m.previousPeers[peer.Address]; exists &&
 			time.Since(previousTime) < m.config.Timeout.Duration {
-			logger.InfoWithFields(ctx, []logger.Field{
+			logger.DebugWithFields(ctx, []logger.Field{
 				logger.String("address", peer.Address),
 				logger.Timestamp("previous_time", previousTime.UnixNano()),
 			}, "Skipping recent peer")
@@ -786,7 +818,7 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 
 		if previousTime, exists := m.scanningPeers[peer.Address]; exists &&
 			time.Since(previousTime) < time.Minute {
-			logger.InfoWithFields(ctx, []logger.Field{
+			logger.DebugWithFields(ctx, []logger.Field{
 				logger.String("address", peer.Address),
 				logger.Timestamp("previous_time", previousTime.UnixNano()),
 			}, "Skipping scanning peer")
@@ -838,7 +870,9 @@ func (m *NodeManager) getScanPeers(ctx context.Context) (PeerList, error) {
 		}
 		list = peers
 		m.peersLists[-1] = list
-		logger.Info(ctx, "Retrieved %d peers for scanning", len(list))
+		logger.VerboseWithFields(ctx, []logger.Field{
+			logger.Int("peer_count", len(list)),
+		}, "Retrieved peers for scanning")
 	}
 
 	return list, nil
@@ -853,7 +887,9 @@ func (m *NodeManager) Scan(ctx context.Context) error {
 		return errors.Wrap(err, "get peers")
 	}
 
-	logger.Info(ctx, "%d peers for scanning", len(peers))
+	logger.VerboseWithFields(ctx, []logger.Field{
+		logger.Int("peer_count", len(peers)),
+	}, "Peers for scanning")
 
 	newNodes := 0
 	offset := 0
@@ -891,7 +927,10 @@ func (m *NodeManager) Scan(ctx context.Context) error {
 		}
 	}
 
-	logger.Info(ctx, "Scanning %d/%d nodes", newNodes, m.config.ScanCount)
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("new_nodes", newNodes),
+		logger.Int("scan_count", m.config.ScanCount),
+	}, "Scanning nodes")
 
 	// Remove used peers
 	m.peersLists[-1] = peers[offset:]
