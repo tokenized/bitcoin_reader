@@ -324,7 +324,7 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 	}
 
 	nanoseconds := time.Since(start).Nanoseconds()
-	logger.VerboseWithFields(ctx, []logger.Field{
+	logger.DebugWithFields(ctx, []logger.Field{
 		logger.Stringer("first_block_hash", firstHash),
 		logger.Uint64("header_count", count),
 		logger.MillisecondsFromNano("average_ms", nanoseconds/int64(count)),
