@@ -135,3 +135,22 @@ func Test_FindPeers(t *testing.T) {
 
 	t.Logf("Verified count : %d/%d", verifiedCount, len(nodes))
 }
+
+func Test_ChannelFlush(t *testing.T) {
+
+	channel := make(chan int, 20)
+	for i := 0; i < 10; i++ {
+		channel <- i
+	}
+
+	for i := 0; i < 5; i++ {
+		v := <-channel
+		t.Logf("Received %d", v)
+	}
+
+	close(channel)
+	for v := range channel {
+		t.Logf("Received %d", v)
+	}
+
+}

@@ -181,10 +181,12 @@ func (m *NodeManager) SendTx(ctx context.Context, tx *wire.MsgTx) error {
 
 	count := 0
 	for _, node := range m.nodes {
-		if !node.node.IsReady() {
-			node.node.sendMessage(ctx, tx)
-			count++
+		if !node.node.IsReady() || node.node.IsBusy() || node.node.IsStopped() {
+			continue
 		}
+
+		node.node.sendMessage(ctx, tx)
+		count++
 	}
 
 	logger.InfoWithFields(ctx, []logger.Field{
