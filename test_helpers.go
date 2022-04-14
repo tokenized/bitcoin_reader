@@ -7,6 +7,8 @@ import (
 	"github.com/tokenized/bitcoin_reader/headers"
 	"github.com/tokenized/pkg/bitcoin"
 	"github.com/tokenized/pkg/wire"
+
+	"github.com/pkg/errors"
 )
 
 type MockHeaderRepository struct {
@@ -46,6 +48,10 @@ func (m *MockHeaderRepository) GetLocatorHashes(ctx context.Context,
 
 func (m *MockHeaderRepository) Height() int {
 	return m.lastHeight
+}
+
+func (m *MockHeaderRepository) Hash(ctx context.Context, height int) (*bitcoin.Hash32, error) {
+	return nil, errors.New("Not implemented")
 }
 
 func (m *MockHeaderRepository) HashHeight(hash bitcoin.Hash32) int {

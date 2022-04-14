@@ -562,7 +562,7 @@ func (n *BitcoinNode) handleTx(ctx context.Context, header *wire.MessageHeader,
 		return errors.Wrap(err, "read message")
 	}
 
-	if header.Length > 1e6 || time.Since(start).Seconds() > 3.0 {
+	if time.Since(start).Seconds() > 3.0 {
 		logger.ElapsedWithFields(ctx, start, []logger.Field{
 			logger.Stringer("txid", tx.TxHash()),
 			logger.Float64("tx_size_mb", float64(header.Length)/1e6),
@@ -677,7 +677,7 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 	// Read transaction count
 	txCount, err := wire.ReadVarInt(rb, wire.ProtocolVersion)
 	if err != nil {
-		logger.Verbose(ctx, "Aborting block (read tx count) : %s", err)
+		logger.Verbose(ctx, "Aborting block download (read tx count) : %s", err)
 		return errors.Wrap(errors.Wrap(err, blockHash.String()), "read tx count")
 	}
 
@@ -696,7 +696,7 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 		if err := tx.Deserialize(rb); err != nil {
 			close(txChannel)
 			wait.Wait()
-			logger.Verbose(ctx, "Aborting block (read tx) : %s", err)
+			logger.Verbose(ctx, "Aborting block download (read tx) : %s", err)
 			return errors.Wrapf(errors.Wrap(err, blockHash.String()), "read tx %d", i)
 		}
 

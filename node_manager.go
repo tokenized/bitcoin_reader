@@ -563,15 +563,47 @@ func (m *NodeManager) synchronizeBlocks(ctx context.Context, interrupt <-chan in
 		logger.Int("last_block_height", lastHeight),
 	}, "Processing blocks")
 
+	done := false
 	for _, hash := range hashes {
-		complete := blockManager.AddRequest(ctx, hash, height, m.blockTxProcessor)
+		complete, abort := blockManager.AddRequest(ctx, hash, height, m.blockTxProcessor)
+		blockDone := false
 
-		select {
-		case <-complete:
-		case <-interrupt:
-			return threads.Interrupted
+		for !blockDone {
+			select {
+			case <-time.After(time.Second * 10):
+				heightHash, err := m.headers.Hash(ctx, height)
+				if err != nil {
+					return errors.Wrap(err, "header hash")
+				}
+
+				if !heightHash.Equal(&hash) {
+					logger.ErrorWithFields(ctx, []logger.Field{
+						logger.Stringer("block_hash", hash),
+						logger.Int("block_height", height),
+					}, "Aborting orphaned block")
+					close(abort)
+				}
+
+			case err := <-complete:
+				if err != nil {
+					if errors.Cause(err) != ErrBlockAborted {
+						logger.ErrorWithFields(ctx, []logger.Field{
+							logger.Stringer("block_hash", hash),
+							logger.Int("block_height", height),
+						}, "Failed to process block : %s", err)
+					}
+					done = true
+				}
+				blockDone = true
+
+			case <-interrupt:
+				return threads.Interrupted
+			}
 		}
 
+		if done {
+			break
+		}
 		height++
 	}
 

@@ -15,6 +15,8 @@ import (
 
 var (
 	ErrWrongBlock = errors.New("Wrong Block")
+
+	ErrBlockAborted = errors.New("Block Aborted")
 )
 
 type BlockManager struct {
@@ -47,7 +49,8 @@ type downloadRequest struct {
 	hash      bitcoin.Hash32
 	height    int
 	processor TxProcessor
-	complete  chan interface{}
+	complete  chan error
+	abort     chan interface{}
 }
 
 func NewBlockManager(blockTxManager BlockTxManager, requestor BlockRequestor,
@@ -63,24 +66,25 @@ func NewBlockManager(blockTxManager BlockTxManager, requestor BlockRequestor,
 }
 
 func (m *BlockManager) AddRequest(ctx context.Context, hash bitcoin.Hash32, height int,
-	processor TxProcessor) <-chan interface{} {
+	processor TxProcessor) (<-chan error, chan<- interface{}) {
 
 	request := &downloadRequest{
 		hash:      hash,
 		height:    height,
 		processor: processor,
-		complete:  make(chan interface{}),
+		complete:  make(chan error),
+		abort:     make(chan interface{}),
 	}
 
 	m.requestLock.Lock()
 	if m.requestsClosed {
 		m.requestLock.Unlock()
-		return nil
+		return nil, nil
 	}
 	m.requests <- request
 	m.requestLock.Unlock()
 
-	return request.complete
+	return request.complete, request.abort
 }
 
 func (m *BlockManager) close(blockInterrupt chan<- interface{}) {
@@ -119,7 +123,11 @@ func (m *BlockManager) Run(ctx context.Context, interrupt <-chan interface{}) er
 				return nil
 			}
 
-			logger.Error(ctx, "Failed to process request : %s", err)
+			logger.ErrorWithFields(ctx, []logger.Field{
+				logger.Stringer("block_hash", request.hash),
+				logger.Int("block_height", request.height),
+			}, "Failed to process request : %s", err)
+
 			return errors.Wrap(err, "process request")
 		}
 	}
@@ -206,7 +214,7 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 			downloaders := m.Downloaders(request.hash)
 			logger.VerboseWithFields(ctx, []logger.Field{
 				logger.Stringers("active_downloads", downloaders),
-			}, "Active downloads")
+			}, "Active block downloads")
 			activeDownloadCount := len(downloaders)
 			if activeDownloadCount > 0 {
 				countWithoutActiveDownload = 0
@@ -229,6 +237,11 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 
 		case <-interrupt:
 			return threads.Interrupted
+
+		case <-request.abort:
+			m.cancelDownloaders(ctx, request.hash)
+			request.complete <- ErrBlockAborted
+			return nil
 
 		case <-m.currentComplete:
 			m.cancelDownloaders(ctx, request.hash) // stop any others still downloading

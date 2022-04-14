@@ -81,6 +81,7 @@ type BitcoinNode struct {
 type HeaderRepository interface {
 	GetNewHeadersAvailableChannel() <-chan *wire.BlockHeader
 	Height() int
+	Hash(ctx context.Context, height int) (*bitcoin.Hash32, error)
 	HashHeight(hash bitcoin.Hash32) int
 	LastHash() bitcoin.Hash32
 	LastTime() uint32
