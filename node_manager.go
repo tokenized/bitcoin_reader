@@ -586,7 +586,7 @@ func (m *NodeManager) synchronizeBlocks(ctx context.Context, interrupt <-chan in
 
 			case err := <-complete:
 				if err != nil {
-					if errors.Cause(err) != ErrBlockAborted {
+					if errors.Cause(err) != BlockAborted {
 						logger.ErrorWithFields(ctx, []logger.Field{
 							logger.Stringer("block_hash", hash),
 							logger.Int("block_height", height),

@@ -16,7 +16,7 @@ import (
 var (
 	ErrWrongBlock = errors.New("Wrong Block")
 
-	ErrBlockAborted = errors.New("Block Aborted")
+	BlockAborted = errors.New("Block Aborted")
 )
 
 type BlockManager struct {
@@ -240,7 +240,7 @@ func (m *BlockManager) processRequest(ctx context.Context, request *downloadRequ
 
 		case <-request.abort:
 			m.cancelDownloaders(ctx, request.hash)
-			request.complete <- ErrBlockAborted
+			request.complete <- BlockAborted
 			return nil
 
 		case <-m.currentComplete:
