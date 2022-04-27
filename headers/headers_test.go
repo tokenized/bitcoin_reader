@@ -443,3 +443,44 @@ func Test_Headers_getOldData(t *testing.T) {
 		}
 	}
 }
+
+func Test_Headers_loadHistoricalHashHeights(t *testing.T) {
+	ctx := tests.Context()
+	store := storage.NewMockStorage()
+	repo := NewRepository(DefaultConfig(), store)
+	repo.DisableDifficulty()
+
+	startTime := uint32(952644136)
+	repo.InitializeWithTimeStamp(startTime)
+	MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 100)
+	hash := repo.LastHash()
+	height := repo.Height()
+
+	MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 10001)
+	hash2 := repo.LastHash()
+	height2 := repo.Height()
+
+	MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 50000)
+
+	if err := repo.Save(ctx); err != nil {
+		t.Fatalf("Failed to save repo : %s", err)
+	}
+
+	readRepo := NewRepository(DefaultConfig(), store)
+	readRepo.DisableDifficulty()
+	if err := readRepo.Load(ctx); err != nil {
+		t.Fatalf("Failed to load repo : %s", err)
+	}
+
+	readHeight := readRepo.HashHeight(hash)
+	t.Logf("Header height 1 : %d", readHeight)
+	if readHeight != height {
+		t.Errorf("Wrong read header height 1 : got %d, want %d", readHeight, height)
+	}
+
+	readHeight2 := readRepo.HashHeight(hash2)
+	t.Logf("Header height 2 : %d", readHeight2)
+	if readHeight2 != height2 {
+		t.Errorf("Wrong read header height 2 : got %d, want %d", readHeight2, height2)
+	}
+}

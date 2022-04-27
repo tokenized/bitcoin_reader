@@ -70,6 +70,8 @@ type Repository struct {
 	disableDifficulty      bool
 	disableSplitProtection bool
 
+	heights map[bitcoin.Hash32]int // Lookup of block height by hash
+
 	// Chain split data
 	requiredSplit *Split
 	genesisHash   bitcoin.Hash32
@@ -85,6 +87,7 @@ func NewRepository(config *Config, store storage.Storage) *Repository {
 	result := &Repository{
 		config:        config,
 		store:         store,
+		heights:       make(map[bitcoin.Hash32]int),
 		invalidHashes: config.InvalidHeaderHashes,
 	}
 
@@ -115,6 +118,7 @@ func NewRepository(config *Config, store storage.Storage) *Repository {
 	}
 
 	result.genesisHash = *genesisHeader(config.Network).BlockHash()
+	result.heights[result.genesisHash] = 0
 
 	return result
 }
@@ -163,7 +167,17 @@ func (repo *Repository) HashHeight(hash bitcoin.Hash32) int {
 	defer repo.Unlock()
 
 	_, height := repo.branches.Find(hash)
-	return height
+	if height != -1 {
+		return height
+	}
+
+	// Lookup in larger map
+	fmt.Printf("Using historical hash heights\n")
+	if result, exists := repo.heights[hash]; exists {
+		return result
+	}
+
+	return -1
 }
 
 func (repo *Repository) PreviousHash(hash bitcoin.Hash32) (*bitcoin.Hash32, int) {
@@ -403,6 +417,7 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 			return errors.Wrap(err, "new branch")
 		}
 		repo.branches = append(repo.branches, newBranch)
+		repo.heights[*header.BlockHash()] = previousHeight + 1
 
 		longest := repo.branches.Longest()
 		if repo.longest != longest {
@@ -427,6 +442,7 @@ func (repo *Repository) ProcessHeader(ctx context.Context, header *wire.BlockHea
 	if !previousBranch.Add(header) {
 		return errors.New("Failed to add header to branch")
 	}
+	repo.heights[*header.BlockHash()] = height
 
 	headersSent := false
 	if previousBranch != repo.longest {
@@ -1076,6 +1092,7 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 		}
 
 		repo.branches[i] = branch
+		repo.loadBranchHashHeights(ctx, branch)
 	}
 	repo.longest = repo.branches.Longest()
 
@@ -1090,12 +1107,84 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 		}
 	}
 
+	if err := repo.loadHistoricalHashHeights(ctx); err != nil {
+		return errors.Wrap(err, "historical heights")
+	}
+
 	logger.InfoWithFields(ctx, []logger.Field{
 		logger.Int("block_height", repo.longest.Height()),
 		logger.Stringer("block_hash", repo.longest.Last().Hash),
 	}, "Loaded headers")
 
 	return nil
+}
+
+func (repo *Repository) loadBranchHashHeights(ctx context.Context, branch *Branch) {
+	height := branch.parentHeight + 1
+	for _, headerData := range branch.headers {
+		repo.heights[headerData.Hash] = height
+		height++
+	}
+}
+
+func (repo *Repository) loadHistoricalHashHeights(ctx context.Context) error {
+	mainBranch := repo.longest
+	height := mainBranch.PrunedLowestHeight()
+
+	count := 0
+	file := height / headersPerFile
+	fileHeight := file * headersPerFile
+	currentFileByteOffset := ((height - fileHeight) * headerDataSerializeSize)
+
+	if currentFileByteOffset == 0 {
+		if file == 0 {
+			logger.Info(ctx, "No historical header hash heights to load")
+			return nil
+		}
+		file--
+	}
+
+	for {
+		fileHeight = file * headersPerFile
+		path := headersFilePath(file)
+		fmt.Printf("Reading file %d : %s\n", file, path)
+		data, err := repo.store.Read(ctx, path)
+		if err != nil {
+			return errors.Wrapf(err, "read: %s", path)
+		}
+
+		buf := bytes.NewReader(data)
+
+		var version uint8
+		if err := binary.Read(buf, endian, &version); err != nil {
+			return errors.Wrap(err, "version")
+		}
+
+		if version != 1 {
+			return fmt.Errorf("Unknown version : %d", version)
+		}
+
+		currentHeight := fileHeight
+		headerData := &HeaderData{}
+		for buf.Len() >= headerDataSerializeSize {
+			if err := headerData.Deserialize(buf); err != nil {
+				return errors.Wrap(err, "deserialize")
+			}
+
+			repo.heights[headerData.Hash] = currentHeight
+			currentHeight++
+			count++
+		}
+
+		if count > 100000 || file == 0 {
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.Int("hash_count", count),
+			}, "Loaded historical header hash heights")
+			return nil
+		}
+
+		file--
+	}
 }
 
 // migrate creates a default branch from the old header data and converts the main branch header
