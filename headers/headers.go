@@ -172,7 +172,6 @@ func (repo *Repository) HashHeight(hash bitcoin.Hash32) int {
 	}
 
 	// Lookup in larger map
-	fmt.Printf("Using historical hash heights\n")
 	if result, exists := repo.heights[hash]; exists {
 		return result
 	}
@@ -564,6 +563,7 @@ func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 		isLongest = branch == repo.longest
 		data := branch.AtHeight(height)
 		if data == nil {
+			repo.Unlock()
 			return -1, false, errors.Wrap(ErrHeaderNotAvailable, proof.BlockHash.String())
 		}
 		proof.BlockHeader = data.Header
@@ -580,11 +580,45 @@ func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 	return blockHeight, isLongest, nil
 }
 
+// GetHeader returns the header with the specified hash with its block height and whether it is
+// in the most proof of work chain.
+func (repo *Repository) GetHeader(ctx context.Context,
+	hash bitcoin.Hash32) (*wire.BlockHeader, int, bool, error) {
+	repo.Lock()
+	defer repo.Unlock()
+
+	branch, height := repo.branches.Find(hash)
+	if branch != nil {
+		data := branch.AtHeight(height)
+		if data == nil {
+			return nil, -1, false, ErrHeaderNotAvailable
+		}
+
+		return data.Header, height, branch == repo.longest, nil
+	}
+
+	// Lookup in larger map
+	if height, exists := repo.heights[hash]; exists {
+		header, err := repo.header(ctx, height)
+		if err != nil {
+			return nil, -1, false, err
+		}
+
+		return header, height, true, nil
+	}
+
+	return nil, -1, false, ErrUnknownHeader
+}
+
 // Header returns the header at the specified height on the longest POW chain.
 func (repo *Repository) Header(ctx context.Context, height int) (*wire.BlockHeader, error) {
 	repo.Lock()
 	defer repo.Unlock()
 
+	return repo.header(ctx, height)
+}
+
+func (repo *Repository) header(ctx context.Context, height int) (*wire.BlockHeader, error) {
 	if height > repo.longest.Height() {
 		return nil, ErrHeightBeyondTip
 	}
@@ -1147,7 +1181,6 @@ func (repo *Repository) loadHistoricalHashHeights(ctx context.Context) error {
 	for {
 		fileHeight = file * headersPerFile
 		path := headersFilePath(file)
-		fmt.Printf("Reading file %d : %s\n", file, path)
 		data, err := repo.store.Read(ctx, path)
 		if err != nil {
 			return errors.Wrapf(err, "read: %s", path)
