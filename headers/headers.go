@@ -1176,7 +1176,7 @@ func (repo *Repository) loadHistoricalHashHeights(ctx context.Context) error {
 			count++
 		}
 
-		if count > 100000 || file == 0 {
+		if file == 0 {
 			logger.InfoWithFields(ctx, []logger.Field{
 				logger.Int("hash_count", count),
 			}, "Loaded historical header hash heights")
