@@ -585,6 +585,10 @@ func (b *Branch) AvailableHeight() int {
 }
 
 func (b *Branch) Prune(count int) {
+	if count < 0 || count >= len(b.headers) {
+		return // already pruned above that height
+	}
+
 	for _, data := range b.headers[:count] {
 		delete(b.heightsMap, data.Hash)
 	}
