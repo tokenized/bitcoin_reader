@@ -1132,7 +1132,7 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 			continue
 		}
 
-		if branch.PrunedLowestHeight() < pruneHeight {
+		if branch.PrunedLowestHeight() <= pruneHeight {
 			branch.Prune(pruneHeight - branch.PrunedLowestHeight())
 		}
 
