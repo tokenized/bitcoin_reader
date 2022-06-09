@@ -1104,9 +1104,13 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 		return errors.Wrap(err, "index count")
 	}
 
-	repo.branches = make(Branches, indexCount)
+	if indexCount == 0 {
+		return errors.New("No branches to load")
+	}
+
+	repo.branches = make(Branches, 0, indexCount)
 	pruneHeight := -1
-	for i := range repo.branches {
+	for i := uint32(0); i < indexCount; i++ {
 		hash := &bitcoin.Hash32{}
 		if err := hash.Deserialize(indexBuf); err != nil {
 			return errors.Wrapf(err, "index %d", i)
@@ -1121,12 +1125,23 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 			pruneHeight = branch.Height() - depth
 		}
 
+		if branch.Height() < pruneHeight {
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.String("branch", branch.Name()),
+			}, "Pruning branch")
+			continue
+		}
+
 		if branch.PrunedLowestHeight() < pruneHeight {
 			branch.Prune(pruneHeight - branch.PrunedLowestHeight())
 		}
 
-		repo.branches[i] = branch
+		repo.branches = append(repo.branches, branch)
 		repo.loadBranchHashHeights(ctx, branch)
+	}
+
+	if len(repo.branches) == 0 {
+		return errors.New("No branches loaded")
 	}
 	repo.longest = repo.branches.Longest()
 

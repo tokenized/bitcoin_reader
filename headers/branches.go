@@ -626,6 +626,11 @@ func LoadBranch(ctx context.Context, store storage.Storage, hash bitcoin.Hash32)
 		height++
 	}
 
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.String("branch", result.Name()),
+		logger.Int("block_height", result.Height()),
+	}, "Loaded branch")
+
 	return result, nil
 }
 
