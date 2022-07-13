@@ -206,8 +206,9 @@ func (m *NodeManager) nextNode(ctx context.Context, hasData NodeHasDataFunction)
 	var busyNodes []fmt.Stringer
 	looped := false
 	for {
-		if m.nextNodeOffset >= len(m.nodes) {
-			if looped {
+		nodeCount := len(m.nodes)
+		if m.nextNodeOffset >= nodeCount {
+			if looped || nodeCount == 0 {
 				logger.WarnWithFields(ctx, []logger.Field{
 					logger.Stringers("stopped", stoppedNodes),
 					logger.Stringers("not_ready", notReadyNodes),
