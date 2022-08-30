@@ -578,7 +578,7 @@ func (m *NodeManager) synchronizeBlocks(ctx context.Context, interrupt <-chan in
 				}
 
 				if !heightHash.Equal(&hash) {
-					logger.ErrorWithFields(ctx, []logger.Field{
+					logger.WarnWithFields(ctx, []logger.Field{
 						logger.Stringer("block_hash", hash),
 						logger.Int("block_height", height),
 					}, "Aborting orphaned block")

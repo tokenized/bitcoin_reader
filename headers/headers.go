@@ -202,8 +202,9 @@ func (repo *Repository) Stop(ctx context.Context) {
 
 	for _, channel := range repo.newHeadersChannels {
 		close(channel)
-		repo.newHeadersChannels = nil
 	}
+
+	repo.newHeadersChannels = nil
 }
 
 // GetLocatorHashes is used to populate initial P2P header requests. They are designed to quickly
