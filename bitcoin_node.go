@@ -362,14 +362,19 @@ func (n *BitcoinNode) SetTxHandler(handler MessageHandlerFunction) {
 }
 
 func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) error {
-	logger.Verbose(ctx, "Connecting to %s", n.address)
+	logger.VerboseWithFields(ctx, []logger.Field{
+		logger.String("address", n.address),
+	}, "Connecting to node")
 
 	if err := n.connect(ctx); err != nil {
 		n.Lock()
 		n.isReady = false
 		n.isStopped = true
 		n.Unlock()
-		return errors.Wrap(err, "connect")
+		logger.VerboseWithFields(ctx, []logger.Field{
+			logger.String("address", n.address),
+		}, "Failed to connect to node : %s", err)
+		return nil
 	}
 
 	n.outgoingMsgChannel.Open(1000)
