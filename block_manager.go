@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
-	"github.com/tokenized/pkg/logger"
-	"github.com/tokenized/pkg/threads"
+	"github.com/tokenized/threads"
 
 	"github.com/pkg/errors"
 )
@@ -42,7 +42,7 @@ type BlockManager struct {
 
 type downloadThread struct {
 	downloader *BlockDownloader
-	thread     *threads.Thread
+	thread     *threads.InterruptableThread
 }
 
 type downloadRequest struct {
@@ -313,20 +313,32 @@ func (m *BlockManager) requestBlock(ctx context.Context, hash bitcoin.Hash32, he
 
 	dt := &downloadThread{
 		downloader: downloader,
-		thread:     threads.NewThread(fmt.Sprintf("Download Block: %s", hash), downloader.Run),
+		thread: threads.NewInterruptableThread(fmt.Sprintf("Download Block: %s", hash),
+			downloader.Run),
 	}
 	df := &downloadFinisher{
 		manager:    m,
 		downloader: downloader,
 	}
-	dt.thread.SetOnComplete(df.onDownloaderCompleted)
+
+	onCompleteChannel := dt.thread.GetCompleteChannel()
+	onCompleteThread := threads.NewUninterruptableThread(fmt.Sprintf("On Block Complete: %s", hash),
+		func(ctx context.Context) error {
+			err, ok := <-onCompleteChannel
+			if ok {
+				df.onDownloaderCompleted(ctx, err)
+			}
+			return nil
+		})
 
 	m.downloaderLock.Lock()
 	m.downloaders = append(m.downloaders, dt)
 	m.downloaderLock.Unlock()
 
 	// Start download thread
-	dt.thread.Start(logger.ContextWithLogFields(ctx, logger.Stringer("connection", nodeID)))
+	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("connection", nodeID))
+	dt.thread.Start(ctx)
+	onCompleteThread.Start(ctx)
 	return nil
 }
 

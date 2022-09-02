@@ -9,7 +9,7 @@ import (
 	"github.com/tokenized/bitcoin_reader/internal/platform/tests"
 	"github.com/tokenized/pkg/bitcoin"
 	"github.com/tokenized/pkg/storage"
-	"github.com/tokenized/pkg/threads"
+	"github.com/tokenized/threads"
 )
 
 func Test_Handshake(t *testing.T) {
@@ -31,7 +31,7 @@ func Test_Handshake(t *testing.T) {
 	node := NewBitcoinNode(address, "/Tokenized/Spynode:Test/", config, headers, peers)
 	node.SetVerifyOnly()
 
-	runThread := threads.NewThread("Run", node.Run)
+	runThread := threads.NewInterruptableThread("Run", node.Run)
 	runComplete := runThread.GetCompleteChannel()
 	runThread.Start(ctx)
 
@@ -89,15 +89,15 @@ func Test_FindPeers(t *testing.T) {
 
 	var wait sync.WaitGroup
 	var nodes []*BitcoinNode
-	var threadList threads.Threads
+	var stopper threads.StopCombiner
 	for i, peer := range peerList {
 		node := NewBitcoinNode(peer.Address, "/Tokenized/Spynode:Test/", config, headers, peers)
 		node.SetVerifyOnly()
 		nodes = append(nodes, node)
 
-		thread := threads.NewThread(fmt.Sprintf("Run (%d)", i), node.Run)
+		thread := threads.NewInterruptableThread(fmt.Sprintf("Run (%d)", i), node.Run)
 		thread.SetWait(&wait)
-		threadList = append(threadList, thread)
+		stopper.Add(thread)
 		thread.Start(ctx)
 
 		if i%100 == 0 {
@@ -111,7 +111,7 @@ func Test_FindPeers(t *testing.T) {
 
 	time.Sleep(5 * time.Second)
 	t.Logf("Stopping")
-	threadList.Stop(ctx)
+	stopper.Stop(ctx)
 	wait.Wait()
 
 	verifiedCount := 0

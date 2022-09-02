@@ -13,10 +13,10 @@ import (
 	"github.com/tokenized/bitcoin_reader"
 	"github.com/tokenized/bitcoin_reader/headers"
 	"github.com/tokenized/config"
+	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
-	"github.com/tokenized/pkg/logger"
 	"github.com/tokenized/pkg/storage"
-	"github.com/tokenized/pkg/threads"
+	"github.com/tokenized/threads"
 
 	"github.com/pkg/errors"
 )
@@ -90,9 +90,8 @@ func main() {
 		BlockRequestDelay:       config.NewDuration(time.Second * 5),
 	}
 	manager := bitcoin_reader.NewNodeManager(userAgent, nodeConfig, headers, peers)
-	managerThread := threads.NewThread("Node Manager", manager.Run)
-	managerThread.SetWait(&wait)
-	managerComplete := managerThread.GetCompleteChannel()
+	managerThread, managerComplete := threads.NewInterruptableThreadComplete("Node Manager",
+		manager.Run, &wait)
 	stopper.Add(managerThread)
 
 	// ---------------------------------------------------------------------------------------------
@@ -105,9 +104,8 @@ func main() {
 	manager.SetTxManager(txManager)
 	stopper.Add(txManager)
 
-	processTxThread := threads.NewThread("Process Txs", txManager.Run)
-	processTxThread.SetWait(&wait)
-	processTxComplete := processTxThread.GetCompleteChannel()
+	processTxThread, processTxComplete := threads.NewInterruptableThreadComplete("Process Txs",
+		txManager.Run, &wait)
 	stopper.Add(processTxThread)
 
 	// blockManager := bitcoin_reader.NewBlockManager(store, manager,
@@ -123,30 +121,27 @@ func main() {
 	// ---------------------------------------------------------------------------------------------
 	// Periodic
 
-	saveThread := threads.NewPeriodicTask("Save", 30*time.Minute, func(ctx context.Context) error {
-		if err := headers.Clean(ctx); err != nil {
-			return errors.Wrap(err, "clean headers")
-		}
-		if err := peers.Save(ctx); err != nil {
-			return errors.Wrap(err, "save peers")
-		}
-		return nil
-	})
-	saveThread.SetWait(&wait)
-	saveComplete := saveThread.GetCompleteChannel()
+	saveThread, saveComplete := threads.NewPeriodicThreadComplete("Save",
+		func(ctx context.Context) error {
+			if err := headers.Clean(ctx); err != nil {
+				return errors.Wrap(err, "clean headers")
+			}
+			if err := peers.Save(ctx); err != nil {
+				return errors.Wrap(err, "save peers")
+			}
+			return nil
+		}, 30*time.Minute, &wait)
 	stopper.Add(saveThread)
 
 	previousTime := time.Now()
-	cleanTxsThread := threads.NewPeriodicTask("Clean Txs", 5*time.Minute,
+	cleanTxsThread, cleanTxsComplete := threads.NewPeriodicThreadComplete("Clean Txs",
 		func(ctx context.Context) error {
 			if err := txManager.Clean(ctx, previousTime); err != nil {
 				return errors.Wrap(err, "clean tx manager")
 			}
 			previousTime = time.Now()
 			return nil
-		})
-	cleanTxsThread.SetWait(&wait)
-	cleanTxsComplete := cleanTxsThread.GetCompleteChannel()
+		}, 5*time.Minute, &wait)
 	stopper.Add(cleanTxsThread)
 
 	// ---------------------------------------------------------------------------------------------

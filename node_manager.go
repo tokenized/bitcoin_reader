@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
-	"github.com/tokenized/pkg/logger"
-	"github.com/tokenized/pkg/threads"
 	"github.com/tokenized/pkg/wire"
+	"github.com/tokenized/threads"
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -49,7 +49,7 @@ type NodeManager struct {
 
 	blockManagerLock   sync.Mutex
 	blockSyncNeeded    bool
-	blockManagerThread *threads.Thread
+	blockManagerThread *threads.InterruptableThread
 
 	initialDelayComplete bool
 	inSync               bool
@@ -61,7 +61,7 @@ type NodeManager struct {
 
 type nodeThread struct {
 	node   *BitcoinNode
-	thread *threads.Thread
+	thread *threads.InterruptableThread
 	id     uuid.UUID
 }
 
@@ -299,51 +299,43 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 	var stopper threads.StopCombiner
 	stopper.Add(m)
 
-	monitorHeadersThread := threads.NewThreadWithoutStop("Monitor Headers", m.MonitorHeaders)
-	monitorHeadersThread.SetWait(&m.wait)
-	monitorHeadersComplete := monitorHeadersThread.GetCompleteChannel()
+	monitorHeadersThread, monitorHeadersComplete := threads.NewUninterruptableThreadComplete("Monitor Headers",
+		m.MonitorHeaders, &m.wait)
 
-	checkHeadersThread := threads.NewPeriodicTask("Check Headers", 5*time.Second, m.CheckHeaders)
-	checkHeadersThread.SetWait(&m.wait)
-	checkHeadersComplete := checkHeadersThread.GetCompleteChannel()
+	checkHeadersThread, checkHeadersComplete := threads.NewPeriodicThreadComplete("Check Headers",
+		m.CheckHeaders, 5*time.Second, &m.wait)
 	stopper.Add(checkHeadersThread)
 
-	cleanThread := threads.NewPeriodicTask("Clean Nodes", 5*time.Second, m.Clean)
-	cleanThread.SetWait(&m.wait)
-	cleanComplete := cleanThread.GetCompleteChannel()
+	cleanThread, cleanComplete := threads.NewPeriodicThreadComplete("Clean Nodes", m.Clean,
+		5*time.Second, &m.wait)
 	stopper.Add(cleanThread)
 
-	statusThread := threads.NewPeriodicTask("Status", 5*time.Minute, m.Status)
-	statusThread.SetWait(&m.wait)
-	statusComplete := statusThread.GetCompleteChannel()
+	statusThread, statusComplete := threads.NewPeriodicThreadComplete("Status", m.Status,
+		5*time.Minute, &m.wait)
 	stopper.Add(statusThread)
 
-	requestTxsThread := threads.NewPeriodicTask("Request Txs", 5*time.Second, m.RequestTxs)
-	requestTxsThread.SetWait(&m.wait)
-	requestTxsComplete := requestTxsThread.GetCompleteChannel()
+	requestTxsThread, requestTxsComplete := threads.NewPeriodicThreadComplete("Request Txs",
+		m.RequestTxs, 5*time.Second, &m.wait)
 	stopper.Add(requestTxsThread)
 
-	findThread := threads.NewPeriodicTask("Find Nodes", 30*time.Second, m.Find)
-	findThread.SetWait(&m.wait)
-	findComplete := findThread.GetCompleteChannel()
+	findThread, findComplete := threads.NewPeriodicThreadComplete("Find Nodes", m.Find,
+		30*time.Second, &m.wait)
 	stopper.Add(findThread)
 
-	scanThread := threads.NewPeriodicTask("Scan Nodes", 10*time.Minute, m.Scan)
-	scanThread.SetWait(&m.wait)
-	scanComplete := scanThread.GetCompleteChannel()
+	scanThread, scanComplete := threads.NewPeriodicThreadComplete("Scan Nodes", m.Scan,
+		10*time.Minute, &m.wait)
 	stopper.Add(scanThread)
 
-	startupDelayThread := threads.NewThread("Startup Delay", func(ctx context.Context,
-		interrupt <-chan interface{}) error {
-
-		select {
-		case <-interrupt:
-			return nil
-		case <-time.After(m.config.StartupDelay.Duration):
-			m.markStartupDelayComplete(ctx)
-			return nil
-		}
-	})
+	startupDelayThread := threads.NewInterruptableThread("Startup Delay",
+		func(ctx context.Context, interrupt <-chan interface{}) error {
+			select {
+			case <-interrupt:
+				return nil
+			case <-time.After(m.config.StartupDelay.Duration):
+				m.markStartupDelayComplete(ctx)
+				return nil
+			}
+		})
 	startupDelayThread.SetWait(&m.wait)
 	stopper.Add(startupDelayThread)
 
@@ -459,7 +451,8 @@ func (m *NodeManager) TriggerBlockSynchronize(ctx context.Context) {
 	}
 
 	// Start a new thread
-	m.blockManagerThread = threads.NewThread("Synchronize Blocks", m.runSynchronizeBlocks)
+	m.blockManagerThread = threads.NewInterruptableThread("Synchronize Blocks",
+		m.runSynchronizeBlocks)
 	m.Lock()
 	m.blockManagerThread.SetWait(&m.syncBlocksWait)
 	m.Unlock()
@@ -869,7 +862,7 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 		}
 
 		nodeCtx := logger.ContextWithLogFields(ctx, logger.Stringer("connection", node.ID()))
-		thread := threads.NewThread(fmt.Sprintf("Node: %s", peer.Address), node.Run)
+		thread := threads.NewInterruptableThread(fmt.Sprintf("Node: %s", peer.Address), node.Run)
 		thread.SetWait(&m.wait)
 		thread.Start(nodeCtx)
 		m.previousPeers[peer.Address] = time.Now()
@@ -945,7 +938,8 @@ func (m *NodeManager) Scan(ctx context.Context) error {
 		node.SetVerifyOnly()
 
 		nodeCtx := logger.ContextWithLogFields(ctx, logger.Stringer("scan_connection", node.ID()))
-		thread := threads.NewThread(fmt.Sprintf("Scan Node: %s", peer.Address), node.Run)
+		thread := threads.NewInterruptableThread(fmt.Sprintf("Scan Node: %s", peer.Address),
+			node.Run)
 		thread.SetWait(&m.wait)
 		thread.Start(nodeCtx)
 		m.scanningPeers[peer.Address] = time.Now()

@@ -11,10 +11,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
-	"github.com/tokenized/pkg/logger"
-	"github.com/tokenized/pkg/threads"
 	"github.com/tokenized/pkg/wire"
+	"github.com/tokenized/threads"
 
 	"github.com/pkg/errors"
 )

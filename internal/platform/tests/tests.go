@@ -3,7 +3,7 @@ package tests
 import (
 	"context"
 
-	"github.com/tokenized/pkg/logger"
+	"github.com/tokenized/logger"
 )
 
 // Context creates a context for testing.

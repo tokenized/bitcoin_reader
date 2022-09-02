@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
-	"github.com/tokenized/pkg/logger"
-	"github.com/tokenized/pkg/threads"
 	"github.com/tokenized/pkg/wire"
+	"github.com/tokenized/threads"
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -384,20 +384,17 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 
 	stopper.Add(n) // close connection and outgoing channel to stop incoming and outgoing threads
 
-	readIncomingThread := threads.NewThreadWithoutStop("Read Incoming", n.readIncoming)
-	readIncomingThread.SetWait(&wait)
-	readIncomingComplete := readIncomingThread.GetCompleteChannel()
+	readIncomingThread, readIncomingComplete := threads.NewUninterruptableThreadComplete("Read Incoming",
+		n.readIncoming, &wait)
 
-	sendOutgoingThread := threads.NewThreadWithoutStop("Send Outgoing", n.sendOutgoing)
-	sendOutgoingThread.SetWait(&wait)
-	sendOutgoingComplete := sendOutgoingThread.GetCompleteChannel()
+	sendOutgoingThread, sendOutgoingComplete := threads.NewUninterruptableThreadComplete("Send Outgoing",
+		n.sendOutgoing, &wait)
 
-	pingThread := threads.NewPeriodicTask("Ping", 10*time.Minute, n.sendPing)
-	pingThread.SetWait(&wait)
-	pingComplete := pingThread.GetCompleteChannel()
+	pingThread, pingComplete := threads.NewPeriodicThreadComplete("Ping", n.sendPing,
+		10*time.Minute, &wait)
 	stopper.Add(pingThread)
 
-	handshakeThread := threads.NewThread("Handshake", n.handshake)
+	handshakeThread := threads.NewInterruptableThread("Handshake", n.handshake)
 	handshakeThread.SetWait(&wait)
 	stopper.Add(handshakeThread)
 

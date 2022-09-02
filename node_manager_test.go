@@ -7,7 +7,7 @@ import (
 	"github.com/tokenized/bitcoin_reader/internal/platform/tests"
 	"github.com/tokenized/pkg/bitcoin"
 	"github.com/tokenized/pkg/storage"
-	"github.com/tokenized/pkg/threads"
+	"github.com/tokenized/threads"
 )
 
 func Test_NodeManager(t *testing.T) {
@@ -27,7 +27,7 @@ func Test_NodeManager(t *testing.T) {
 	peers.LoadSeeds(ctx, bitcoin.MainNet)
 
 	manager := NewNodeManager("/Tokenized/Spynode:Test/", config, headers, peers)
-	runThread := threads.NewThread("Run", manager.Run)
+	runThread := threads.NewInterruptableThread("Run", manager.Run)
 	runComplete := runThread.GetCompleteChannel()
 	runThread.Start(ctx)
 
