@@ -126,12 +126,21 @@ func (m *NodeManager) RequestBlock(ctx context.Context, hash bitcoin.Hash32,
 		return node.HasBlock(ctx, hash, height)
 	}
 
-	node := m.nextNode(ctx, nodeHasBlock)
-	if node == nil {
-		return nil, ErrNodeNotAvailable
-	}
+	for {
+		node := m.nextNode(ctx, nodeHasBlock)
+		if node == nil {
+			return nil, ErrNodeNotAvailable
+		}
 
-	return node, node.RequestBlock(ctx, hash, handler, onStop)
+		if err := node.RequestBlock(ctx, hash, handler, onStop); err == nil {
+			return node, nil
+		} else {
+			cause := errors.Cause(err)
+			if cause != ErrChannelClosed && cause != ErrBusy {
+				return nil, errors.Wrap(err, "node")
+			}
+		}
+	}
 }
 
 func (m *NodeManager) RequestHeaders(ctx context.Context) error {
@@ -140,12 +149,21 @@ func (m *NodeManager) RequestHeaders(ctx context.Context) error {
 
 	ctx = logger.ContextWithLogFields(ctx, logger.String("task", "Request Headers"))
 
-	node := m.nextNode(ctx, nil)
-	if node == nil {
-		return nil
-	}
+	for {
+		node := m.nextNode(ctx, nil)
+		if node == nil {
+			return nil
+		}
 
-	return node.RequestHeaders(ctx)
+		if err := node.RequestHeaders(ctx); err == nil {
+			return nil
+		} else {
+			cause := errors.Cause(err)
+			if cause != ErrChannelClosed && cause != ErrBusy {
+				return errors.Wrap(err, "node")
+			}
+		}
+	}
 }
 
 func (m *NodeManager) RequestTxs(ctx context.Context) error {
@@ -158,21 +176,30 @@ func (m *NodeManager) RequestTxs(ctx context.Context) error {
 
 	ctx = logger.ContextWithLogFields(ctx, logger.String("task", "Request Transactions"))
 
-	node := m.nextNode(ctx, nil)
-	if node == nil {
-		return nil
-	}
+	for {
+		node := m.nextNode(ctx, nil)
+		if node == nil {
+			return nil
+		}
 
-	txids, err := m.txManager.GetTxRequests(ctx, node.id, m.config.TxRequestCount)
-	if err != nil {
-		return errors.Wrap(err, "get tx requests")
-	}
+		txids, err := m.txManager.GetTxRequests(ctx, node.id, m.config.TxRequestCount)
+		if err != nil {
+			return errors.Wrap(err, "get tx requests")
+		}
 
-	if len(txids) == 0 {
-		return nil
-	}
+		if len(txids) == 0 {
+			return nil
+		}
 
-	return node.RequestTxs(ctx, txids)
+		if err := node.RequestTxs(ctx, txids); err == nil {
+			return nil
+		} else {
+			cause := errors.Cause(err)
+			if cause != ErrChannelClosed && cause != ErrBusy {
+				return errors.Wrap(err, "node")
+			}
+		}
+	}
 }
 
 func (m *NodeManager) SendTx(ctx context.Context, tx *wire.MsgTx) error {
@@ -185,8 +212,9 @@ func (m *NodeManager) SendTx(ctx context.Context, tx *wire.MsgTx) error {
 			continue
 		}
 
-		node.node.sendMessage(ctx, tx)
-		count++
+		if err := node.node.sendMessage(ctx, tx); err == nil {
+			count++
+		}
 	}
 
 	logger.InfoWithFields(ctx, []logger.Field{
@@ -350,26 +378,26 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 
 	// Wait for interrupt or a thread to stop
 	select {
-	case <-monitorHeadersComplete:
-		logger.Warn(ctx, "Finished: Monitor Headers")
+	case err := <-monitorHeadersComplete:
+		logger.Error(ctx, "Monitor Headers Completed : %s", err)
 
-	case <-checkHeadersComplete:
-		logger.Warn(ctx, "Finished: Check Headers")
+	case err := <-checkHeadersComplete:
+		logger.Error(ctx, "Check Headers Completed : %s", err)
 
-	case <-cleanComplete:
-		logger.Warn(ctx, "Finished: Clean")
+	case err := <-cleanComplete:
+		logger.Error(ctx, "Clean Completed : %s", err)
 
-	case <-statusComplete:
-		logger.Warn(ctx, "Finished: Status")
+	case err := <-statusComplete:
+		logger.Error(ctx, "Status Completed : %s", err)
 
-	case <-requestTxsComplete:
-		logger.Warn(ctx, "Finished: Request Txs")
+	case err := <-requestTxsComplete:
+		logger.Error(ctx, "Request Txs Completed : %s", err)
 
-	case <-findComplete:
-		logger.Warn(ctx, "Finished: Find")
+	case err := <-findComplete:
+		logger.Error(ctx, "Find Completed : %s", err)
 
-	case <-scanComplete:
-		logger.Warn(ctx, "Finished: Scan")
+	case err := <-scanComplete:
+		logger.Error(ctx, "Scan Completed : %s", err)
 
 	case <-interrupt:
 	}

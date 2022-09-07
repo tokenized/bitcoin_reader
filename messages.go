@@ -28,6 +28,7 @@ var (
 	ErrConnectionClosed = errors.New("Connection Closed")
 	ErrWrongNetwork     = errors.New("Wrong Network")
 	ErrMessageTooLarge  = errors.New("Message Too Large")
+	ErrChannelClosed    = errors.New("Channel closed")
 
 	// The endian encoding of messages.
 	endian = binary.LittleEndian
@@ -127,7 +128,7 @@ func (c *MessageChannel) Add(msg wire.Message) error {
 	defer c.lock.Unlock()
 
 	if !c.open {
-		return errors.New("Channel closed")
+		return ErrChannelClosed
 	}
 
 	c.Channel <- msg

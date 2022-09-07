@@ -51,6 +51,7 @@ type TxData struct {
 func NewTxManager(requestTimeout time.Duration) *TxManager {
 	result := &TxManager{
 		txMaps:         make([]*txMap, 256),
+		txChannel:      make(chan *wire.MsgTx, 1000),
 		requestTimeout: requestTimeout,
 	}
 
@@ -64,10 +65,6 @@ func NewTxManager(requestTimeout time.Duration) *TxManager {
 func (m *TxManager) SetTxProcessor(txProcessor TxProcessor) {
 	m.Lock()
 	m.txProcessor = txProcessor
-
-	if txProcessor != nil {
-		m.txChannel = make(chan *wire.MsgTx, 1000)
-	}
 	m.Unlock()
 }
 
@@ -77,12 +74,12 @@ func (m *TxManager) SetTxSaver(txSaver TxSaver) {
 	m.Unlock()
 }
 
-func (m *TxManager) Run(ctx context.Context, interrupt <-chan interface{}) error {
-	if m.txChannel == nil {
-		select {
-		case <-interrupt:
-			return nil
-		}
+func (m *TxManager) Run(ctx context.Context) error {
+	m.txChannelLock.Lock()
+	txChannel := m.txChannel
+	m.txChannelLock.Unlock()
+	if txChannel == nil {
+		return ErrChannelClosed
 	}
 
 	m.Lock()
@@ -90,46 +87,42 @@ func (m *TxManager) Run(ctx context.Context, interrupt <-chan interface{}) error
 	txSaver := m.txSaver
 	m.Unlock()
 
-	for {
-		select {
-		case <-interrupt:
-			for range m.txChannel { // flush channel
-			}
-			return nil
+	if txProcessor == nil {
+		// wait for channel to close
+		for range txChannel {
+		}
 
-		case tx, ok := <-m.txChannel:
-			if !ok { // channel closed
-				return nil
-			}
+		return nil
+	}
 
-			if txProcessor != nil {
-				isRelevant, err := txProcessor.ProcessTx(ctx, tx)
-				if err != nil {
-					return errors.Wrap(err, "process tx")
-				}
+	for tx := range txChannel {
+		isRelevant, err := txProcessor.ProcessTx(ctx, tx)
+		if err != nil {
+			return errors.Wrap(err, "process tx")
+		}
 
-				if isRelevant {
-					logger.InfoWithFields(ctx, []logger.Field{
-						logger.Stringer("txid", tx.TxHash()),
-						logger.Float64("tx_size_kb", float64(tx.SerializeSize())/1e3),
-					}, "Relevant Tx")
+		if isRelevant {
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.Stringer("txid", tx.TxHash()),
+				logger.Float64("tx_size_kb", float64(tx.SerializeSize())/1e3),
+			}, "Relevant Tx")
 
-					if txSaver != nil {
-						if err := txSaver.SaveTx(ctx, tx); err != nil {
-							return errors.Wrap(err, "save tx")
-						}
-					}
+			if txSaver != nil {
+				if err := txSaver.SaveTx(ctx, tx); err != nil {
+					return errors.Wrap(err, "save tx")
 				}
 			}
 		}
 	}
+
+	return nil
 }
 
 func (m *TxManager) Stop(ctx context.Context) {
 	m.txChannelLock.Lock()
 	if m.txChannel != nil {
 		close(m.txChannel)
-		m.txChannelClosed = true
+		m.txChannel = nil
 	}
 	m.txChannelLock.Unlock()
 }
@@ -224,9 +217,9 @@ func (m *TxManager) AddTx(ctx context.Context, nodeID uuid.UUID, tx *wire.MsgTx)
 	data, exists := txMap.txs[txid]
 	if exists {
 		txMap.Unlock()
+		data.Lock()
 
 		isNew := false
-		data.Lock()
 		if data.Received == nil {
 			data.Received = &now
 			data.ReceivedFrom = &nodeID
@@ -261,7 +254,7 @@ func (m *TxManager) sendTx(tx *wire.MsgTx) {
 	m.txChannelLock.Lock()
 	defer m.txChannelLock.Unlock()
 
-	if m.txChannelClosed {
+	if m.txChannel == nil {
 		return
 	}
 

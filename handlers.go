@@ -54,7 +54,8 @@ func (n *BitcoinNode) handleMessage(ctx context.Context, connection net.Conn) er
 	} else if command == wire.CmdBlock {
 		timeout = time.Minute
 	}
-	waitWarning := logger.NewWaitingWarning(ctx, timeout, "Handle message: %s", command)
+	waitWarning := logger.NewWaitingWarning(ctx, timeout, "Handle message: %s (%d bytes)", command,
+		header.Length)
 	if err := handler(ctx, header, connection); err != nil {
 		waitWarning.Cancel()
 		return errors.Wrapf(err, "handle: %s", command)
@@ -105,7 +106,7 @@ func (n *BitcoinNode) handleProtoconf(ctx context.Context, header *wire.MessageH
 		return errors.Wrap(err, "read message")
 	}
 
-	logger.InfoWithFields(ctx, []logger.Field{
+	logger.VerboseWithFields(ctx, []logger.Field{
 		logger.Uint64("numberOfFields", msg.NumberOfFields),
 		logger.Uint32("maxReceivePayloadLength", msg.MaxReceivePayloadLength),
 		logger.String("streamPolicies", msg.StreamPolicies),
@@ -163,13 +164,13 @@ func (n *BitcoinNode) handleHeadersVerify(ctx context.Context, header *wire.Mess
 		r = io.TeeReader(r, buffer)
 
 		var wait sync.WaitGroup
-		wait.Add(1)
-		go func() {
-			if err := n.headerHandler(ctx, header, buffer); err != nil {
-				logger.Info(ctx, "Header handler failed : %s", err)
-			}
-			wait.Done()
-		}()
+		thread := threads.NewUninterruptableThread("Handle Headers",
+			func(ctx context.Context) error {
+				return n.headerHandler(ctx, header, buffer)
+			})
+		thread.SetWait(&wait)
+
+		thread.Start(ctx)
 
 		// "defers" are executed LIFO, so this will happen after the discard below, which is what we
 		// want so the alternate handler will see the full message.
@@ -240,13 +241,13 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 		r = io.TeeReader(r, buffer)
 
 		var wait sync.WaitGroup
-		wait.Add(1)
-		go func() {
-			if err := n.headerHandler(ctx, header, buffer); err != nil {
-				logger.Info(ctx, "Header handler failed : %s", err)
-			}
-			wait.Done()
-		}()
+		thread := threads.NewUninterruptableThread("Handle Headers",
+			func(ctx context.Context) error {
+				return n.headerHandler(ctx, header, buffer)
+			})
+		thread.SetWait(&wait)
+
+		thread.Start(ctx)
 
 		// "defers" are executed LIFO, so this will happen after the discard below, which is what we
 		// want so the alternate handler will see the full message.
@@ -683,13 +684,18 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 
 	var wait sync.WaitGroup
 	txChannel := make(chan *wire.MsgTx, 1000)
-	wait.Add(1)
-	go func() {
-		if err := blockHandler(ctx, blockHeader, txCount, txChannel); err == nil {
-			n.peers.UpdateScore(ctx, n.Address(), 1)
-		}
-		wait.Done()
-	}()
+
+	blockHandlerThread := threads.NewUninterruptableThread("Block Handler",
+		func(ctx context.Context) error {
+			err := blockHandler(ctx, blockHeader, txCount, txChannel)
+			if err == nil {
+				n.peers.UpdateScore(ctx, n.Address(), 1)
+			}
+			return err
+		})
+	blockHandlerThread.SetWait(&wait)
+
+	blockHandlerThread.Start(ctx)
 
 	for i := uint64(0); i < txCount; i++ {
 		tx := &wire.MsgTx{}
@@ -702,6 +708,7 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 
 		txChannel <- tx
 	}
+
 	close(txChannel)
 	wait.Wait()
 

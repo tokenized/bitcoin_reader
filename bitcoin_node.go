@@ -172,10 +172,12 @@ func (n *BitcoinNode) IsBusy() bool {
 
 func (n *BitcoinNode) HasBlock(ctx context.Context, hash bitcoin.Hash32, height int) bool {
 	n.Lock()
-	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("connection", n.id))
+	id := n.id
 	lastRequestedBlock := n.lastRequestedBlock
 	lastHeaderHash := n.lastHeaderHash
 	n.Unlock()
+
+	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("connection", id))
 
 	if lastRequestedBlock != nil && lastRequestedBlock.Equal(&hash) {
 		logger.Verbose(ctx, "Already requested block from this node")

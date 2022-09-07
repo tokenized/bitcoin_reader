@@ -104,9 +104,9 @@ func main() {
 	manager.SetTxManager(txManager)
 	stopper.Add(txManager)
 
-	processTxThread, processTxComplete := threads.NewInterruptableThreadComplete("Process Txs",
+	processTxThread, processTxComplete := threads.NewUninterruptableThreadComplete("Process Txs",
 		txManager.Run, &wait)
-	stopper.Add(processTxThread)
+	stopper.Add(txManager)
 
 	// blockManager := bitcoin_reader.NewBlockManager(store, manager,
 	// nodeConfig.ConcurrentBlockRequests, nodeConfig.BlockRequestDelay)
