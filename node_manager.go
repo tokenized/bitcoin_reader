@@ -283,23 +283,27 @@ func (m *NodeManager) nextNode(ctx context.Context, hasData NodeHasDataFunction)
 	}
 }
 
-func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) error {
-	defer func() {
-		waitWarning := logger.NewWaitingWarning(ctx, 3*time.Second,
-			"Node Manager Sync Blocks Shutdown")
-		m.syncBlocksWait.Wait()
-		waitWarning.Cancel()
+func (m *NodeManager) Wait(ctx context.Context) {
+	waitWarning := logger.NewWaitingWarning(ctx, 3*time.Second,
+		"Node Manager Sync Blocks Shutdown")
+	m.syncBlocksWait.Wait()
+	waitWarning.Cancel()
 
-		waitWarning = logger.NewWaitingWarning(ctx, 3*time.Second, "Node Manager Shutdown")
-		m.wait.Wait()
-		waitWarning.Cancel()
-	}()
+	waitWarning = logger.NewWaitingWarning(ctx, 3*time.Second, "Node Manager Shutdown")
+	m.wait.Wait()
+	waitWarning.Cancel()
+}
+
+func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) error {
+	defer m.Wait(ctx)
 
 	var resultErr error
-	if err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil {
+	if verifiedPeers, err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil {
 		if errors.Cause(err) == errPeersNotAvailable {
-			logger.Info(ctx, "No peers with score 1. Finding peers with score 0")
-			if err := m.FindByScore(ctx, 0, m.config.DesiredNodeCount/2); err != nil {
+			logger.InfoWithFields(ctx, []logger.Field{
+				logger.Int("verified_peers", len(verifiedPeers)),
+			}, "No peers with score 1. Finding peers with score 0")
+			if _, err := m.FindByScore(ctx, 0, m.config.DesiredNodeCount/2); err != nil {
 				resultErr = errors.Wrap(err, "find")
 			}
 		} else {
@@ -795,12 +799,14 @@ func (m *NodeManager) Status(ctx context.Context) error {
 
 // Find attempts to ensure the desired number of nodes are connected.
 func (m *NodeManager) Find(ctx context.Context) error {
-	if err := m.FindByScore(ctx, 5, m.config.DesiredNodeCount/4); err != nil &&
+	qualityPeers, err := m.FindByScore(ctx, 5, m.config.DesiredNodeCount/4)
+	if err != nil &&
 		errors.Cause(err) != errPeersNotAvailable {
 		return err
 	}
 
-	if err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil &&
+	verifiedPeers, err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2)
+	if err != nil &&
 		errors.Cause(err) != errPeersNotAvailable {
 		return err
 	}
@@ -809,8 +815,22 @@ func (m *NodeManager) Find(ctx context.Context) error {
 	nodeCount := len(m.nodes)
 	m.Unlock()
 
+	var unverifiedPeers PeerList
+	if nodeCount < (m.config.DesiredNodeCount/4)*3 {
+		peers, err := m.FindByScore(ctx, 0, m.config.DesiredNodeCount/2)
+		if err != nil &&
+			errors.Cause(err) != errPeersNotAvailable {
+			return err
+		}
+		unverifiedPeers = peers
+	}
+
 	if nodeCount < m.config.DesiredNodeCount/2 {
-		logger.Info(ctx, "Not enough peers available. Scanning")
+		logger.InfoWithFields(ctx, []logger.Field{
+			logger.Int("quality_peers", len(qualityPeers)),
+			logger.Int("verified_peers", len(verifiedPeers)),
+			logger.Int("unverified_peers", len(unverifiedPeers)),
+		}, "Not enough peers available. Scanning")
 		if err := m.Scan(ctx); err != nil &&
 			errors.Cause(err) != errPeersNotAvailable {
 			return err
@@ -847,17 +867,18 @@ func (m *NodeManager) getPeers(ctx context.Context, score int) (PeerList, error)
 	return list, nil
 }
 
-func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
+// FindByScore attempts to connect to the specified max number of peers with the specified score.
+func (m *NodeManager) FindByScore(ctx context.Context, score, max int) (PeerList, error) {
 	m.Lock()
 	defer m.Unlock()
 
 	if len(m.nodes) >= m.config.DesiredNodeCount {
-		return nil
+		return nil, nil
 	}
 
 	peers, err := m.getPeers(ctx, score)
 	if err != nil {
-		return errors.Wrap(err, "get peers")
+		return nil, errors.Wrap(err, "get peers")
 	}
 
 	logger.VerboseWithFields(ctx, []logger.Field{
@@ -917,10 +938,10 @@ func (m *NodeManager) FindByScore(ctx context.Context, score, max int) error {
 	m.peersLists[score] = peers[offset:]
 
 	if newNodes == 0 {
-		return errPeersNotAvailable
+		return peers, errPeersNotAvailable
 	}
 
-	return nil
+	return peers, nil
 }
 
 func (m *NodeManager) getScanPeers(ctx context.Context) (PeerList, error) {
@@ -940,6 +961,8 @@ func (m *NodeManager) getScanPeers(ctx context.Context) (PeerList, error) {
 	return list, nil
 }
 
+// Scan connects to a large number of low score peers to verify if they are valid. Those nodes are
+// immediately disconnected after the header chain is verified.
 func (m *NodeManager) Scan(ctx context.Context) error {
 	m.Lock()
 	defer m.Unlock()
@@ -991,6 +1014,7 @@ func (m *NodeManager) Scan(ctx context.Context) error {
 	}
 
 	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("peer_count", len(peers)),
 		logger.Int("new_nodes", newNodes),
 		logger.Int("scan_count", m.config.ScanCount),
 	}, "Scanning nodes")

@@ -180,17 +180,14 @@ func (n *BitcoinNode) HasBlock(ctx context.Context, hash bitcoin.Hash32, height 
 	ctx = logger.ContextWithLogFields(ctx, logger.Stringer("connection", id))
 
 	if lastRequestedBlock != nil && lastRequestedBlock.Equal(&hash) {
-		logger.Verbose(ctx, "Already requested block from this node")
 		return false // already requested this block and failed
 	}
 
 	if lastHeaderHash == nil {
-		logger.Verbose(ctx, "No headers to check block hash")
 		return false
 	}
 
 	if lastHeaderHash.Equal(&hash) {
-		logger.Verbose(ctx, "Requested block is last header")
 		return true
 	}
 
@@ -202,15 +199,6 @@ func (n *BitcoinNode) HasBlock(ctx context.Context, hash bitcoin.Hash32, height 
 		return false // node's last header isn't in our chain
 	}
 
-	if lastHeight >= height {
-		logger.VerboseWithFields(ctx, []logger.Field{
-			logger.Int("last_height", lastHeight),
-		}, "Requested block is at or below node's last header")
-	} else {
-		logger.VerboseWithFields(ctx, []logger.Field{
-			logger.Int("last_height", lastHeight),
-		}, "Requested block is above node's last header")
-	}
 	return lastHeight >= height
 }
 
@@ -413,7 +401,7 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	case <-sendOutgoingComplete:
 	case <-pingComplete:
 	case <-time.After(n.config.Timeout.Duration):
-		logger.Info(ctx, "Node reached timeout")
+		logger.Verbose(ctx, "Node reached timeout")
 	}
 
 	stopper.Stop(ctx)
@@ -518,7 +506,7 @@ func (n *BitcoinNode) handshake(ctx context.Context, interrupt <-chan interface{
 
 			switch message := msg.(type) {
 			case *wire.MsgVersion:
-				logger.InfoWithFields(ctx, []logger.Field{
+				logger.VerboseWithFields(ctx, []logger.Field{
 					logger.String("address", address),
 					logger.String("user_agent", message.UserAgent),
 					logger.Int32("protocol", message.ProtocolVersion),
@@ -539,9 +527,7 @@ func (n *BitcoinNode) handshake(ctx context.Context, interrupt <-chan interface{
 				}
 
 			case *wire.MsgVerAck:
-				logger.Verbose(ctx, "Version acknowledged")
 				verAckReceived = true
-
 				if versionReceived {
 					return n.sendVerifyInitiation(ctx)
 				}
@@ -598,7 +584,7 @@ func (n *BitcoinNode) accept(ctx context.Context) error {
 	n.Unlock()
 
 	if isVerifyOnly {
-		logger.Info(ctx, "Disconnecting after chain verification")
+		logger.Verbose(ctx, "Disconnecting after chain verification")
 		n.Stop(ctx)
 		return nil
 	}
@@ -621,7 +607,7 @@ func (n *BitcoinNode) accept(ctx context.Context) error {
 		return errors.Wrap(err, "build addresses")
 	}
 
-	logger.Info(ctx, "Sending %d addresses", len(addresses.AddrList))
+	logger.Verbose(ctx, "Sending %d addresses", len(addresses.AddrList))
 	if err := n.sendMessage(ctx, addresses); err != nil {
 		return errors.Wrap(err, "send addresses")
 	}

@@ -63,7 +63,7 @@ func (n *BitcoinNode) readIncoming(ctx context.Context) error {
 
 		if connection == nil {
 			if !connectionClosedLocally {
-				logger.Info(ctx, "Connection closed remotely")
+				logger.Verbose(ctx, "Connection closed remotely")
 			}
 			return nil // disconnected
 		}
@@ -74,9 +74,9 @@ func (n *BitcoinNode) readIncoming(ctx context.Context) error {
 				connectionClosedLocally := n.connectionClosedLocally
 				n.connectionLock.Unlock()
 				if !connectionClosedLocally {
-					logger.Info(ctx, "Connection closed remotely : %s", err)
+					logger.Verbose(ctx, "Connection closed remotely : %s", err)
 				} else {
-					logger.Info(ctx, "Disconnected : %s", err)
+					logger.Verbose(ctx, "Disconnected : %s", err)
 				}
 				return nil
 			} else {
@@ -111,7 +111,7 @@ func (n *BitcoinNode) sendOutgoing(ctx context.Context) error {
 
 		if _, err := wire.WriteMessageN(connection, msg, wire.ProtocolVersion,
 			wire.BitcoinNet(n.config.Network)); err != nil {
-			logger.ErrorWithFields(ctx, []logger.Field{
+			logger.VerboseWithFields(ctx, []logger.Field{
 				logger.String("command", msg.Command()),
 			}, "Failed to send message : %s", err)
 			for range n.outgoingMsgChannel.Channel { // flush channel

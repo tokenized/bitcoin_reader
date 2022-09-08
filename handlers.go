@@ -19,6 +19,16 @@ import (
 	"github.com/pkg/errors"
 )
 
+func sizeString(size uint64) string {
+	if size < 1e3 {
+		return fmt.Sprintf("%d B", size)
+	} else if size < 1e6 {
+		return fmt.Sprintf("%0.2f KB", float64(size)/1e3)
+	}
+
+	return fmt.Sprintf("%0.2f MB", float64(size)/1e6)
+}
+
 func (n *BitcoinNode) handleMessage(ctx context.Context, connection net.Conn) error {
 	n.Lock()
 	network := n.config.Network
@@ -54,8 +64,8 @@ func (n *BitcoinNode) handleMessage(ctx context.Context, connection net.Conn) er
 	} else if command == wire.CmdBlock {
 		timeout = time.Minute
 	}
-	waitWarning := logger.NewWaitingWarning(ctx, timeout, "Handle message: %s (%d bytes)", command,
-		header.Length)
+	waitWarning := logger.NewWaitingWarning(ctx, timeout, "Handle message: %s (%s)", command,
+		sizeString(header.Length))
 	if err := handler(ctx, header, connection); err != nil {
 		waitWarning.Cancel()
 		return errors.Wrapf(err, "handle: %s", command)
@@ -206,7 +216,7 @@ func (n *BitcoinNode) handleHeadersVerify(ctx context.Context, header *wire.Mess
 	hash := blockHeader.BlockHash()
 
 	if err := n.headers.VerifyHeader(ctx, blockHeader); err == nil {
-		logger.InfoWithFields(ctx, []logger.Field{
+		logger.VerboseWithFields(ctx, []logger.Field{
 			logger.Stringer("block_hash", hash),
 			logger.Uint64("header_count", count),
 		}, "Chain Verified")
@@ -215,7 +225,7 @@ func (n *BitcoinNode) handleHeadersVerify(ctx context.Context, header *wire.Mess
 			return err
 		}
 	} else {
-		logger.InfoWithFields(ctx, []logger.Field{
+		logger.VerboseWithFields(ctx, []logger.Field{
 			logger.Stringer("block_hash", hash),
 		}, "Could not verify chain: %s", err)
 		n.Stop(ctx)
@@ -229,7 +239,6 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 	r io.Reader) error {
 
 	if !n.IsReady() {
-		logger.Info(ctx, "Discarding headers message")
 		return nil
 	}
 
@@ -269,11 +278,11 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 	if count == 0 {
 		n.Lock()
 		if len(n.lastHeaderRequest) == 0 {
-			logger.Warn(ctx, "Zero headers provided. Last requested header not known")
+			logger.Verbose(ctx, "Zero headers provided. Last requested header not known")
 		} else {
 			hash := n.lastHeaderRequest[len(n.lastHeaderRequest)-1]
 			n.lastHeaderHash = &hash
-			logger.InfoWithFields(ctx, []logger.Field{
+			logger.VerboseWithFields(ctx, []logger.Field{
 				logger.Stringer("last_header_hash", hash),
 			}, "Zero headers provided. Using last requested header")
 		}
@@ -306,7 +315,7 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 				locatorHashes[i] = hash
 			}
 
-			logger.InfoWithFields(ctx, []logger.Field{
+			logger.VerboseWithFields(ctx, []logger.Field{
 				logger.Stringer("block_hash", hash),
 				logger.Int("block_height", n.headers.HashHeight(*hash)),
 				logger.String("issue", err.Error()),
@@ -587,7 +596,7 @@ func discardBlock(ctx context.Context, header *wire.MessageHeader, r io.Reader,
 
 	remaining := header.Length - counter.Count()
 	if remaining > 0 {
-		logger.InfoWithFields(ctx, []logger.Field{
+		logger.VerboseWithFields(ctx, []logger.Field{
 			logger.Stringer("block_hash", blockHash),
 			logger.Float64("block_size_mb", float64(header.Length)/1e6),
 			logger.Float64("remaining_mb", float64(remaining)/1e6),
@@ -595,7 +604,7 @@ func discardBlock(ctx context.Context, header *wire.MessageHeader, r io.Reader,
 	}
 	DiscardInputWithCounter(r, header.Length, counter)
 	if remaining > 0 {
-		logger.InfoWithFields(ctx, []logger.Field{
+		logger.VerboseWithFields(ctx, []logger.Field{
 			logger.Stringer("block_hash", blockHash),
 			logger.Float64("block_size_mb", float64(header.Length)/1e6),
 			logger.Float64("remaining_mb", float64(remaining)/1e6),

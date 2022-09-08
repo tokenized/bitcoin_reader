@@ -65,8 +65,9 @@ github.com/tokenized/logger v0.1.1 h1:KIGeri1ThNpkOi5ghvpB3PFeVw9VZWeKADxFnM9n1E
 github.com/tokenized/logger v0.1.1/go.mod h1:bA5PfUEFwtUy0yEIIq4Q3ZwBk1kIZTkYIRASq3fPw+k=
 github.com/tokenized/pkg v0.4.1-0.20220906215914-999453d439df h1:zZBDO26DiHGUrVOh/nN639DTiNUr8xAIkdpy2OGbKHM=
 github.com/tokenized/pkg v0.4.1-0.20220906215914-999453d439df/go.mod h1:uUb7b1xHv6KfTB+b+FzAlUNJ/al+K7cEAT2wT2Ltglo=
-github.com/tokenized/threads v0.1.1-0.20220902155404-d844f8ac41b5 h1:A2AqLzw2qnHdYWl9kfe45mKPFHfDCbY/iVEd2k/L/Xs=
 github.com/tokenized/threads v0.1.1-0.20220902155404-d844f8ac41b5/go.mod h1:Dii75FyJFZwaFWPai5CrczSZpF8vqznaCtkiwDx/WEg=
+github.com/tokenized/threads v0.1.1-0.20220908162622-5e406dccfad8 h1:MXjD8KpXTyc9hf7AK+BQ9Ip9OjGoIyQTFcz6uI5m+Vg=
+github.com/tokenized/threads v0.1.1-0.20220908162622-5e406dccfad8/go.mod h1:Dii75FyJFZwaFWPai5CrczSZpF8vqznaCtkiwDx/WEg=
 github.com/tyler-smith/go-bip32 v0.0.0-20170922074101-2c9cfd177564 h1:NXXyQVeRVLK8Xu27/hkkjwVOZLk5v4ZBEvvMtqMqznM=
 github.com/tyler-smith/go-bip32 v0.0.0-20170922074101-2c9cfd177564/go.mod h1:0/YuQQF676+d4CMNclTqGUam1EDwz0B8o03K9pQqA3c=
 golang.org/x/crypto v0.0.0-20170930174604-9419663f5a44/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
