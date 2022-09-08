@@ -793,20 +793,26 @@ func (m *NodeManager) Status(ctx context.Context) error {
 	return nil
 }
 
+// Find attempts to ensure the desired number of nodes are connected.
 func (m *NodeManager) Find(ctx context.Context) error {
 	if err := m.FindByScore(ctx, 5, m.config.DesiredNodeCount/4); err != nil &&
 		errors.Cause(err) != errPeersNotAvailable {
 		return err
 	}
 
-	if err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil {
-		if errors.Cause(err) == errPeersNotAvailable {
-			logger.Info(ctx, "Peers not available")
-			if err := m.Scan(ctx); err != nil &&
-				errors.Cause(err) != errPeersNotAvailable {
-				return err
-			}
-		} else {
+	if err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil &&
+		errors.Cause(err) != errPeersNotAvailable {
+		return err
+	}
+
+	m.Lock()
+	nodeCount := len(m.nodes)
+	m.Unlock()
+
+	if nodeCount < m.config.DesiredNodeCount/2 {
+		logger.Info(ctx, "Not enough peers available. Scanning")
+		if err := m.Scan(ctx); err != nil &&
+			errors.Cause(err) != errPeersNotAvailable {
 			return err
 		}
 	}
