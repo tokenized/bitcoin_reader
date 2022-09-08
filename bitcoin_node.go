@@ -548,7 +548,9 @@ func (n *BitcoinNode) handshake(ctx context.Context, interrupt <-chan interface{
 			}
 
 		case <-time.After(3 * time.Second):
-			return ErrTimeout
+			logger.Verbose(ctx, "Handshake timed out")
+			n.Stop(ctx)
+			return nil
 
 		case <-interrupt:
 			return nil
