@@ -863,6 +863,16 @@ func (repo *Repository) consolidate(ctx context.Context) error {
 		return errors.New("Missing oldest branch")
 	}
 
+	if oldestBranch == repo.longest {
+		logger.InfoWithFields(ctx, []logger.Field{
+			logger.Int("from_height", oldestBranch.PrunedLowestHeight()),
+			logger.Int("to_height", oldestBranch.Height()),
+			logger.String("accumulated_work", oldestBranch.Last().AccumulatedWork.Text(16)),
+			logger.Stringer("tip", oldestBranch.Last().Hash),
+		}, "No main branch consolidation needed")
+		return nil
+	}
+
 	longestBranch := repo.longest
 
 	// Convert longest branch into oldest branch.
