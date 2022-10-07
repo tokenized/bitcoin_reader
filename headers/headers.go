@@ -820,7 +820,7 @@ func (repo *Repository) clean(ctx context.Context) error {
 		return errors.Wrap(err, "consolidate")
 	}
 
-	// Write oldest branch headers to main header set and prune.
+	// Write oldest branch headers to main header set.
 	if err := repo.saveMainBranch(ctx); err != nil {
 		return errors.Wrap(err, "save main branches")
 	}
@@ -842,65 +842,82 @@ func (repo *Repository) clean(ctx context.Context) error {
 	return nil
 }
 
+// consolidate consolidates the longest branch into one branch that goes straight back to oldest
+// header, so that the longest branch is contiguous and the other branches fork from it.
 func (repo *Repository) consolidate(ctx context.Context) error {
-	if repo.longest.parentHeight != -1 {
-		// Consolidate longest branch into the branch that goes back to oldest
-		var oldestBranch *Branch
-		for _, branch := range repo.branches {
-			if branch.parentHeight == -1 {
-				oldestBranch = branch
-				break
-			}
+	var oldestBranch *Branch
+	oldestHeight := -2
+	for _, branch := range repo.branches {
+		if branch.parentHeight == -1 {
+			oldestBranch = branch
+			break // can't be older than genesis block so use this branch
 		}
 
-		if oldestBranch == nil {
-			return errors.New("Missing oldest branch")
+		if branch.parentHeight < oldestHeight {
+			oldestBranch = branch
+			oldestHeight = branch.parentHeight
 		}
-
-		longestBranch := repo.longest
-
-		// Convert longest branch into oldest branch.
-		newMainBranch, linkHeight, err := longestBranch.Consolidate(ctx, repo.store, oldestBranch)
-		if err != nil {
-			return errors.Wrap(err, "derive")
-		}
-		logger.InfoWithFields(ctx, []logger.Field{
-			logger.Int("from_height", newMainBranch.PrunedLowestHeight()),
-			logger.Int("to_height", newMainBranch.Height()),
-			logger.String("accumulated_work", newMainBranch.Last().AccumulatedWork.Text(16)),
-			logger.Stringer("tip", newMainBranch.Last().Hash),
-		}, "Derived new main header branch")
-
-		newBranches := Branches{newMainBranch}
-
-		// Reconnect previously oldest branch to the new main branch.
-		newOldestBranch, err := oldestBranch.Truncate(ctx, repo.store, newMainBranch, linkHeight)
-		if err != nil {
-			return errors.Wrap(err, "truncate previous oldest to main")
-		}
-
-		newBranches = append(newBranches, newOldestBranch)
-
-		// Sort by parent height so they can be properly connected to the new main branch.
-		sort.Sort(repo.branches)
-
-		// Reconnect other branches to the new main branch. This should result in the previously
-		// main branch being made a child to this branch.
-		for _, branch := range repo.branches {
-			if branch == oldestBranch || branch == longestBranch {
-				continue // already replaced by new branches
-			}
-
-			newBranch, err := branch.Connect(ctx, repo.store, newBranches)
-			if err != nil {
-				return errors.Wrap(err, "connect to main")
-			}
-			newBranches = append(newBranches, newBranch)
-		}
-
-		repo.branches = newBranches
-		repo.longest = newMainBranch
 	}
+
+	if oldestBranch == nil {
+		return errors.New("Missing oldest branch")
+	}
+
+	longestBranch := repo.longest
+
+	// Convert longest branch into oldest branch.
+	newMainBranch, linkHeight, err := longestBranch.Consolidate(ctx, repo.store, oldestBranch)
+	if err != nil {
+		return errors.Wrap(err, "derive")
+	}
+	logger.InfoWithFields(ctx, []logger.Field{
+		logger.Int("from_height", newMainBranch.PrunedLowestHeight()),
+		logger.Int("to_height", newMainBranch.Height()),
+		logger.String("accumulated_work", newMainBranch.Last().AccumulatedWork.Text(16)),
+		logger.Stringer("tip", newMainBranch.Last().Hash),
+	}, "Derived new main header branch")
+
+	newBranches := Branches{newMainBranch}
+
+	// Reconnect previously oldest branch to the new main branch.
+	newOldestBranch, err := oldestBranch.Truncate(ctx, repo.store, newMainBranch, linkHeight)
+	if err != nil {
+		return errors.Wrap(err, "truncate previous oldest to main")
+	}
+
+	newBranches = append(newBranches, newOldestBranch)
+
+	// Sort by parent height so they can be properly connected to the new main branch.
+	sort.Sort(repo.branches)
+
+	// Reconnect other branches to the new main branch. This should result in the previously
+	// main branch being made a child to this branch.
+	for _, branch := range repo.branches {
+		if branch == oldestBranch || branch == longestBranch {
+			continue // already replaced by new branches
+		}
+
+		newBranch, err := branch.Connect(ctx, repo.store, newBranches)
+		if err != nil {
+			logger.ErrorWithFields(ctx, []logger.Field{
+				logger.String("branch_name", branch.Name()),
+				logger.Stringer("previous_block_hash", branch.PreviousHash()),
+			}, "Failed to connect branch to main : %s", err)
+
+			if err := branch.Save(ctx, repo.store); err != nil {
+				logger.ErrorWithFields(ctx, []logger.Field{
+					logger.String("branch_name", branch.Name()),
+					logger.Stringer("previous_block_hash", branch.PreviousHash()),
+				}, "Failed to save unlinkable branch : %s", err)
+			}
+
+			continue
+		}
+		newBranches = append(newBranches, newBranch)
+	}
+
+	repo.branches = newBranches
+	repo.longest = newMainBranch
 
 	return nil
 }
@@ -917,7 +934,7 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 	currentFileByteOffset := ((height - fileHeight) * headerDataSerializeSize)
 	buf := &bytes.Buffer{}
 
-	if currentFileByteOffset > 0 {
+	if mainBranch.offset != 1 && currentFileByteOffset > 0 {
 		data, err := repo.store.Read(ctx, path)
 		if err != nil {
 			return errors.Wrapf(err, "read: %s", path)
@@ -942,10 +959,12 @@ func (repo *Repository) saveMainBranch(ctx context.Context) error {
 		height++
 
 		if height == nextFileHeight {
+			// Write this file.
 			if err := repo.store.Write(ctx, path, buf.Bytes(), nil); err != nil {
 				return errors.Wrapf(err, "write: %s", path)
 			}
 
+			// Start a new file.
 			file++
 			fileHeight = nextFileHeight
 			nextFileHeight += headersPerFile
@@ -1008,6 +1027,13 @@ func (repo *Repository) prune(ctx context.Context, depth int) error {
 	// Prune branches
 	height := repo.longest.Height()
 	pruneHeight := height - depth
+	for _, branch := range repo.branches[1:] {
+		parentHeight := branch.ParentHeight()
+		if parentHeight < pruneHeight {
+			pruneHeight = parentHeight
+		}
+	}
+
 	logger.InfoWithFields(ctx, []logger.Field{
 		logger.Int("block_height", height),
 		logger.Stringer("latest_block_hash", repo.longest.Last().Hash),
@@ -1109,7 +1135,7 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 		return errors.New("No branches to load")
 	}
 
-	repo.branches = make(Branches, 0, indexCount)
+	branches := make(Branches, 0, indexCount)
 	pruneHeight := -1
 	for i := uint32(0); i < indexCount; i++ {
 		hash := &bitcoin.Hash32{}
@@ -1137,24 +1163,34 @@ func (repo *Repository) load(ctx context.Context, depth int) error {
 			branch.Prune(pruneHeight - branch.PrunedLowestHeight())
 		}
 
-		repo.branches = append(repo.branches, branch)
+		branches = append(branches, branch)
 		repo.loadBranchHashHeights(ctx, branch)
 	}
 
-	if len(repo.branches) == 0 {
+	if len(branches) == 0 {
 		return errors.New("No branches loaded")
 	}
-	repo.longest = repo.branches.Longest()
+	repo.longest = branches.Longest()
 
 	// Connect branches to parents
-	sort.Sort(repo.branches)
-	for _, branch := range repo.branches {
+	sort.Sort(branches)
+	repo.branches = nil
+	for _, branch := range branches {
 		if branch.parentHeight == -1 {
+			// main branch
+			repo.branches = append(repo.branches, branch)
 			continue
 		}
+
 		if err := branch.Link(repo.branches); err != nil {
-			return errors.Wrapf(err, "link branch %s", branch.Name())
+			logger.ErrorWithFields(ctx, []logger.Field{
+				logger.String("branch_name", branch.Name()),
+				logger.Stringer("previous_block_hash", branch.PreviousHash()),
+			}, "Failed to link loaded branch : %s", err)
+			continue
 		}
+
+		repo.branches = append(repo.branches, branch)
 	}
 
 	if err := repo.loadHistoricalHashHeights(ctx); err != nil {

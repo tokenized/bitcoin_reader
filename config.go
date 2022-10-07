@@ -10,7 +10,8 @@ import (
 type Config struct {
 	Network bitcoin.Network `default:"mainnet" json:"network" envconfig:"NETWORK"`
 
-	// Timeout is the amount of time a node will remain connected
+	// Timeout is the amount of time a node will remain connected. This is to promote making new
+	// connections to keep a diverse set of peers.
 	Timeout config.Duration `default:"4h" json:"timeout" envconfig:"NODE_TIMEOUT"`
 
 	// ScanCount is the number of peer addresses that will be scanned for valid peers when a scan is

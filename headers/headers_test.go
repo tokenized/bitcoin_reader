@@ -276,6 +276,10 @@ func Test_Headers_Clean(t *testing.T) {
 		t.Fatalf("Failed to load repo : %s", err)
 	}
 
+	if len(loadedRepo.branches) != 2 {
+		t.Fatalf("Wrong loaded branch count : got %d, want %d", len(loadedRepo.branches), 2)
+	}
+
 	firstBranch = loadedRepo.branches[0]
 	if firstBranch.PrunedLowestHeight() != 610 {
 		t.Errorf("Wrong first branch pruned lowest height : got %d, want %d",
@@ -482,5 +486,58 @@ func Test_Headers_loadHistoricalHashHeights(t *testing.T) {
 	t.Logf("Header height 2 : %d", readHeight2)
 	if readHeight2 != height2 {
 		t.Errorf("Wrong read header height 2 : got %d, want %d", readHeight2, height2)
+	}
+}
+
+func Test_Headers_Reorg_1(t *testing.T) {
+	ctx := tests.Context()
+	store := storage.NewMockStorage()
+	repo := NewRepository(DefaultConfig(), store)
+	repo.DisableDifficulty()
+
+	startTime := uint32(952644136)
+	repo.InitializeWithTimeStamp(startTime)
+	MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 100)
+	hash := repo.LastHash()
+	height := repo.Height()
+	t.Logf("Header height : %d : %s", height, hash)
+	originalLatestHash := hash
+
+	hashes := make([]bitcoin.Hash32, repo.longest.Height()+1)
+	for i := range hashes {
+		hashes[i] = repo.longest.AtHeight(i).Hash
+		// t.Logf("Header : %d : %s", i, hashes[i])
+	}
+
+	branchHash := hashes[height-1]
+	t.Logf("Branch height : %d : %s", height-1, hashes[height-1])
+
+	MockHeaders(ctx, repo, branchHash, repo.LastTime(), 2)
+
+	hash = repo.LastHash()
+	height = repo.Height()
+	t.Logf("Header height : %d : %s", height, hash)
+
+	if height != 101 {
+		t.Errorf("Wrong latest block height : got %d, want %d", height, 101)
+	}
+
+	if hash.Equal(&originalLatestHash) {
+		t.Errorf("Wrong latest block hash : got %s, don't want %s", hash, originalLatestHash)
+	}
+
+	at100, err := repo.Hash(ctx, 100)
+	if err != nil {
+		t.Fatalf("Failed to get block at height 100 : %s", err)
+	}
+
+	if at100 == nil {
+		t.Fatalf("Missing hash at 100")
+	}
+
+	t.Logf("Block hash at 100 : %s", at100)
+
+	if at100.Equal(&originalLatestHash) {
+		t.Errorf("Wrong block hash at height 100 : got %s, don't want %s", hash, originalLatestHash)
 	}
 }

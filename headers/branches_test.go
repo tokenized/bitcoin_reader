@@ -606,3 +606,74 @@ func Test_Branches_Trim(t *testing.T) {
 		}
 	}
 }
+
+// Test_Branches_BranchOfBranch tests a consolidation when there is a branch of a branch.
+func Test_Branches_BranchOfBranch(t *testing.T) {
+	ctx := tests.Context()
+	firstBranchSize := 10
+
+	for offset := 0; offset < firstBranchSize; offset++ {
+		store := storage.NewMockStorage()
+		repo := NewRepository(DefaultConfig(), store)
+		repo.DisableDifficulty()
+
+		startTime := uint32(952644136)
+		repo.InitializeWithTimeStamp(startTime)
+		initialHeaders := MockHeaders(ctx, repo, repo.LastHash(), repo.LastTime(), 15)
+
+		for i, header := range initialHeaders {
+			t.Logf("Header %d : %s", 1+i, header.BlockHash())
+		}
+
+		firstBranchHeader := initialHeaders[9]
+		firstBranchHash := *firstBranchHeader.BlockHash()
+
+		firstBranchHeaders := MockHeaders(ctx, repo, firstBranchHash, firstBranchHeader.Timestamp,
+			firstBranchSize)
+
+		for i, header := range firstBranchHeaders {
+			t.Logf("Header %d : %s", 11+i, header.BlockHash())
+		}
+
+		secondBranchHeader := firstBranchHeaders[offset]
+		secondBranchHash := *secondBranchHeader.BlockHash()
+
+		secondBranchHeaders := MockHeaders(ctx, repo, secondBranchHash,
+			secondBranchHeader.Timestamp, 8)
+
+		for i, header := range secondBranchHeaders {
+			t.Logf("Header %d : %s", 15+i, header.BlockHash())
+		}
+
+		for i, branch := range repo.branches {
+			t.Logf("Branch %d : %s", i, branch.String(""))
+			t.Logf("Hashes : %s", branch.StringHeaderHashes("    "))
+		}
+
+		if err := repo.saveMainBranch(ctx); err != nil {
+			t.Fatalf("Failed to save main branch : %s", err)
+		}
+
+		if err := repo.prune(ctx, 8); err != nil {
+			t.Fatalf("Failed to prune repo : %s", err)
+		}
+
+		t.Logf("After prune")
+
+		for i, branch := range repo.branches {
+			t.Logf("Branch %d : %s", i, branch.String(""))
+			t.Logf("Hashes : %s", branch.StringHeaderHashes("    "))
+		}
+
+		if err := repo.consolidate(ctx); err != nil {
+			t.Fatalf("Failed to consolidate repo : %s", err)
+		}
+
+		t.Logf("After consolidate")
+
+		for i, branch := range repo.branches {
+			t.Logf("Branch %d : %s", i, branch.String(""))
+			t.Logf("Hashes : %s", branch.StringHeaderHashes("    "))
+		}
+	}
+}

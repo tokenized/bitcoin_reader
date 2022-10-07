@@ -11,8 +11,9 @@ import (
 )
 
 func MockHeaders(ctx context.Context, repo *Repository, afterHash bitcoin.Hash32, timestamp uint32,
-	count int) {
+	count int) []*wire.BlockHeader {
 
+	var headers []*wire.BlockHeader
 	previousHash := afterHash
 	for i := 0; i < count; i++ {
 		header := &wire.BlockHeader{
@@ -28,9 +29,12 @@ func MockHeaders(ctx context.Context, repo *Repository, afterHash bitcoin.Hash32
 			panic(fmt.Sprintf("add header %d: %s", i, err))
 		}
 
+		headers = append(headers, header)
 		previousHash = *header.BlockHash()
 		timestamp += 600
 	}
+
+	return headers
 }
 
 func MockHeadersOnBranch(branch *Branch, count int) {

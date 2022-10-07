@@ -57,6 +57,7 @@ func (l Branches) Less(i, j int) bool {
 func (b Branch) String(pad string) string {
 	result := fmt.Sprintf("\n%sHas parent    : %t\n", pad, b.parent != nil)
 	result += fmt.Sprintf("%sParent height : %d\n", pad, b.parentHeight)
+	result += fmt.Sprintf("%sPrevious hash : %s\n", pad, b.firstHeader.PrevBlock)
 	result += fmt.Sprintf("%sFirst hash    : %s\n", pad, b.firstHeader.BlockHash())
 	result += fmt.Sprintf("%sOffset        : %d\n", pad, b.offset)
 	result += fmt.Sprintf("%sHeader Count  : %d\n", pad, len(b.headers))
@@ -144,6 +145,10 @@ func (b Branch) Last() *HeaderData {
 
 func (b Branch) Height() int {
 	return b.parentHeight + b.offset + len(b.headers) - 1
+}
+
+func (b Branch) ParentHeight() int {
+	return b.parentHeight + b.offset - 1
 }
 
 func (b Branch) Length() int {
@@ -339,6 +344,7 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 	var previous *Branch
 	for {
 		if current == other {
+			println("linking to other")
 			linkBranches = append(linkBranches, current)
 			if previous != nil {
 				linkHeights = append(linkHeights, previous.parentHeight)
@@ -349,6 +355,7 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 		}
 
 		if current.parent == nil {
+			println("not ancestor")
 			return nil, 0, ErrNotAncestor
 		}
 
@@ -368,6 +375,7 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 	for i := len(linkBranches) - 1; i >= 0; i-- {
 		linkBranch := linkBranches[i]
 		linkHeight := linkHeights[i]
+		println("linkHeight", linkHeight)
 
 		if len(result.headers) > 0 {
 			lastHash := result.headers[len(result.headers)-1].Hash
@@ -385,8 +393,14 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 
 		// Add remaining headers to the next height
 		endHeight := linkHeight - linkBranch.PrunedLowestHeight() + 1
+		println("endHeight", endHeight)
+		println("len", len(linkBranch.headers))
 		if linkHeight == -1 {
 			endHeight = len(linkBranch.headers)
+		}
+		if endHeight > len(linkBranch.headers) {
+			return nil, 0, fmt.Errorf("Header end height too high : %d (%d headers)", endHeight,
+				len(linkBranch.headers))
 		}
 		for _, header := range linkBranch.headers[:endHeight] {
 			result.add(header, height)
@@ -453,7 +467,8 @@ func (b *Branch) Truncate(ctx context.Context, store storage.Storage,
 }
 
 // Connect creates a new branch that connects to the lowest point possible on one of the branches
-// specified. "branches" should be sorted by oldest first.
+// specified. "branches" should be sorted by oldest first so the connection is made to the oldest
+// branch.
 func (b *Branch) Connect(ctx context.Context, store storage.Storage,
 	branches Branches) (*Branch, error) {
 
