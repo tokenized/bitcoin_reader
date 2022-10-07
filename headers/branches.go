@@ -344,7 +344,6 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 	var previous *Branch
 	for {
 		if current == other {
-			println("linking to other")
 			linkBranches = append(linkBranches, current)
 			if previous != nil {
 				linkHeights = append(linkHeights, previous.parentHeight)
@@ -355,7 +354,6 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 		}
 
 		if current.parent == nil {
-			println("not ancestor")
 			return nil, 0, ErrNotAncestor
 		}
 
@@ -375,7 +373,6 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 	for i := len(linkBranches) - 1; i >= 0; i-- {
 		linkBranch := linkBranches[i]
 		linkHeight := linkHeights[i]
-		println("linkHeight", linkHeight)
 
 		if len(result.headers) > 0 {
 			lastHash := result.headers[len(result.headers)-1].Hash
@@ -393,8 +390,6 @@ func (b *Branch) Consolidate(ctx context.Context, store storage.Storage,
 
 		// Add remaining headers to the next height
 		endHeight := linkHeight - linkBranch.PrunedLowestHeight() + 1
-		println("endHeight", endHeight)
-		println("len", len(linkBranch.headers))
 		if linkHeight == -1 {
 			endHeight = len(linkBranch.headers)
 		}

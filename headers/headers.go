@@ -530,9 +530,6 @@ func (repo *Repository) sendBranchUpdate(branch, previousLongest *Branch) error 
 // VerifyMerkleProof verifies that the merkle proof connects to the valid chain of headers and that
 // the calculated merkle root matches the header. It returns the block height of the header that
 // this proof is linked to and true if it is in the longest POW chain.
-//
-// TODO We might need to load older headers than are in memory to verify older merkle proofs --ce
-//
 func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 	proof *merkle_proof.MerkleProof) (int, bool, error) {
 
@@ -540,36 +537,20 @@ func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 	isLongest := false
 	if proof.BlockHeader != nil {
 		hash := *proof.BlockHeader.BlockHash()
-
-		repo.Lock()
-
-		branch, height := repo.branches.Find(hash)
-		if branch == nil {
-			repo.Unlock()
-			return -1, false, errors.Wrap(ErrUnknownHeader, hash.String())
+		height, longest, err := repo.CheckHeader(ctx, hash)
+		if err != nil {
+			return -1, false, errors.Wrap(err, hash.String())
 		}
 		blockHeight = height
-		isLongest = branch == repo.longest
-
-		repo.Unlock()
+		isLongest = longest
 	} else if proof.BlockHash != nil {
-		repo.Lock()
-
-		branch, height := repo.branches.Find(*proof.BlockHash)
-		if branch == nil {
-			repo.Unlock()
-			return -1, false, errors.Wrap(ErrUnknownHeader, proof.BlockHash.String())
+		header, height, longest, err := repo.GetHeader(ctx, *proof.BlockHash)
+		if err != nil {
+			return -1, false, errors.Wrap(err, proof.BlockHash.String())
 		}
 		blockHeight = height
-		isLongest = branch == repo.longest
-		data := branch.AtHeight(height)
-		if data == nil {
-			repo.Unlock()
-			return -1, false, errors.Wrap(ErrHeaderNotAvailable, proof.BlockHash.String())
-		}
-		proof.BlockHeader = data.Header
-
-		repo.Unlock()
+		isLongest = longest
+		proof.BlockHeader = header
 	} else {
 		return -1, false, merkle_proof.ErrNotVerifiable
 	}
@@ -579,6 +560,25 @@ func (repo *Repository) VerifyMerkleProof(ctx context.Context,
 	}
 
 	return blockHeight, isLongest, nil
+}
+
+// CheckHeader returns the header block height and whether it is in the most proof of work chain.
+func (repo *Repository) CheckHeader(ctx context.Context,
+	hash bitcoin.Hash32) (int, bool, error) {
+	repo.Lock()
+	defer repo.Unlock()
+
+	branch, height := repo.branches.Find(hash)
+	if branch != nil {
+		return height, branch == repo.longest, nil
+	}
+
+	// Lookup in larger map
+	if height, exists := repo.heights[hash]; exists {
+		return height, true, nil
+	}
+
+	return -1, false, ErrUnknownHeader
 }
 
 // GetHeader returns the header with the specified hash with its block height and whether it is
