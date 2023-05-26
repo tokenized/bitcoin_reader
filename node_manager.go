@@ -295,8 +295,6 @@ func (m *NodeManager) Wait(ctx context.Context) {
 }
 
 func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) error {
-	defer m.Wait(ctx)
-
 	var resultErr error
 	if verifiedPeers, err := m.FindByScore(ctx, 1, m.config.DesiredNodeCount/2); err != nil {
 		if errors.Cause(err) == errPeersNotAvailable {
@@ -320,6 +318,7 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 
 	if resultErr != nil {
 		m.Stop(ctx)
+		m.Wait(ctx)
 		return resultErr
 	}
 
@@ -408,6 +407,7 @@ func (m *NodeManager) Run(ctx context.Context, interrupt <-chan interface{}) err
 
 	// Stop the remaining threads. This also calls NodeManager.Stop.
 	stopper.Stop(ctx)
+	m.Wait(ctx)
 
 	return threads.CombineErrors(
 		monitorHeadersThread.Error(),

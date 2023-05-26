@@ -22,9 +22,7 @@ type TxManager struct {
 	txMaps         []*txMap
 	requestTimeout time.Duration
 
-	txChannel       chan *wire.MsgTx
-	txChannelClosed bool
-	txChannelLock   sync.Mutex
+	txChannel chan *wire.MsgTx
 
 	txProcessor TxProcessor
 	txSaver     TxSaver
@@ -75,13 +73,6 @@ func (m *TxManager) SetTxSaver(txSaver TxSaver) {
 }
 
 func (m *TxManager) Run(ctx context.Context) error {
-	m.txChannelLock.Lock()
-	txChannel := m.txChannel
-	m.txChannelLock.Unlock()
-	if txChannel == nil {
-		return ErrChannelClosed
-	}
-
 	m.Lock()
 	txProcessor := m.txProcessor
 	txSaver := m.txSaver
@@ -89,13 +80,13 @@ func (m *TxManager) Run(ctx context.Context) error {
 
 	if txProcessor == nil {
 		// wait for channel to close
-		for range txChannel {
+		for range m.txChannel {
 		}
 
 		return nil
 	}
 
-	for tx := range txChannel {
+	for tx := range m.txChannel {
 		isRelevant, err := txProcessor.ProcessTx(ctx, tx)
 		if err != nil {
 			return errors.Wrap(err, "process tx")
@@ -119,12 +110,7 @@ func (m *TxManager) Run(ctx context.Context) error {
 }
 
 func (m *TxManager) Stop(ctx context.Context) {
-	m.txChannelLock.Lock()
-	if m.txChannel != nil {
-		close(m.txChannel)
-		m.txChannel = nil
-	}
-	m.txChannelLock.Unlock()
+	close(m.txChannel)
 }
 
 func newTxMap() *txMap {
@@ -205,7 +191,9 @@ func appendID(ids []uuid.UUID, newID uuid.UUID) []uuid.UUID {
 
 // AddTx registers that we have received the full tx data. We want to keep the txid around for a
 // while to ensure we don't re-request it in case it is still propagating some of the nodes.
-func (m *TxManager) AddTx(ctx context.Context, nodeID uuid.UUID, tx *wire.MsgTx) error {
+func (m *TxManager) AddTx(ctx context.Context, interrupt <-chan interface{}, nodeID uuid.UUID,
+	tx *wire.MsgTx) error {
+
 	now := time.Now()
 	txid := *tx.TxHash()
 
@@ -228,7 +216,7 @@ func (m *TxManager) AddTx(ctx context.Context, nodeID uuid.UUID, tx *wire.MsgTx)
 		data.Unlock()
 
 		if isNew {
-			m.sendTx(tx)
+			m.sendTx(ctx, interrupt, tx)
 		}
 
 		return nil
@@ -245,20 +233,30 @@ func (m *TxManager) AddTx(ctx context.Context, nodeID uuid.UUID, tx *wire.MsgTx)
 	txMap.txs[txid] = data
 	txMap.Unlock()
 
-	m.sendTx(tx)
+	m.sendTx(ctx, interrupt, tx)
 	return nil
 }
 
 // sendTx adds a tx to the tx channel if it is set.
-func (m *TxManager) sendTx(tx *wire.MsgTx) {
-	m.txChannelLock.Lock()
-	defer m.txChannelLock.Unlock()
-
-	if m.txChannel == nil {
-		return
+func (m *TxManager) sendTx(ctx context.Context, interrupt <-chan interface{}, tx *wire.MsgTx) {
+	start := time.Now()
+	for {
+		select {
+		case m.txChannel <- tx:
+			return
+		case <-interrupt:
+			logger.WarnWithFields(ctx, []logger.Field{
+				logger.Stringer("txid", tx.TxHash()),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Aborting add to tx manager channel")
+			return
+		case <-time.After(3 * time.Second):
+			logger.WarnWithFields(ctx, []logger.Field{
+				logger.Stringer("txid", tx.TxHash()),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Waiting to add to tx manager channel")
+		}
 	}
-
-	m.txChannel <- tx
 }
 
 type indexList []int

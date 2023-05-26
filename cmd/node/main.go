@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokenized/bitcoin_reader"
 	"github.com/tokenized/bitcoin_reader/headers"
+	"github.com/tokenized/bitcoin_reader/internal/platform/tests"
 	"github.com/tokenized/config"
 	"github.com/tokenized/logger"
 	"github.com/tokenized/pkg/bitcoin"
@@ -35,7 +36,7 @@ func main() {
 	if len(logPath) > 0 {
 		os.MkdirAll(path.Dir(logPath), os.ModePerm)
 	}
-	isDevelopment := false
+	isDevelopment := true
 
 	logConfig := logger.NewConfig(isDevelopment, false, logPath)
 
@@ -69,10 +70,7 @@ func main() {
 		peers.LoadSeeds(ctx, bitcoin.MainNet)
 	}
 
-	var wait sync.WaitGroup
-	var stopper threads.StopCombiner
-
-	stopper.Add(headers)
+	var managerWait, wait sync.WaitGroup
 
 	// ---------------------------------------------------------------------------------------------
 	// Node Manager (Bitcoin P2P)
@@ -91,32 +89,27 @@ func main() {
 	}
 	manager := bitcoin_reader.NewNodeManager(userAgent, nodeConfig, headers, peers)
 	managerThread, managerComplete := threads.NewInterruptableThreadComplete("Node Manager",
-		manager.Run, &wait)
-	stopper.Add(managerThread)
+		manager.Run, &managerWait)
 
 	// ---------------------------------------------------------------------------------------------
 	// Processing
 
-	// processor := platform.NewMockDataProcessor()
+	processor := tests.NewMockDataProcessor()
 
 	txManager := bitcoin_reader.NewTxManager(2 * time.Second)
-	// txManager.SetTxProcessor(processor)
+	txManager.SetTxProcessor(processor)
 	manager.SetTxManager(txManager)
-	stopper.Add(txManager)
+
+	blockTxManager := tests.NewBlockTxManager(store)
 
 	processTxThread, processTxComplete := threads.NewUninterruptableThreadComplete("Process Txs",
 		txManager.Run, &wait)
-	stopper.Add(txManager)
 
-	// blockManager := bitcoin_reader.NewBlockManager(store, manager,
-	// nodeConfig.ConcurrentBlockRequests, nodeConfig.BlockRequestDelay)
-	// manager.SetBlockManager(blockTxManager, blockManager, processor)
-	// stopper.Add(blockManager)
+	blockManager := bitcoin_reader.NewBlockManager(blockTxManager, manager, 5, time.Second*30)
+	manager.SetBlockManager(blockTxManager, blockManager, processor)
 
-	// processBlocksThread := threads.NewThread("Process Blocks", blockManager.Run)
-	// processBlocksThread.SetWait(&wait)
-	// processBlocksComplete := processBlocksThread.GetCompleteChannel()
-	// stopper.Add(processBlocksThread)
+	processBlocksThread, processBlocksComplete := threads.NewInterruptableThreadComplete("Process Blocks",
+		blockManager.Run, &wait)
 
 	// ---------------------------------------------------------------------------------------------
 	// Periodic
@@ -131,7 +124,6 @@ func main() {
 			}
 			return nil
 		}, 30*time.Minute, &wait)
-	stopper.Add(saveThread)
 
 	previousTime := time.Now()
 	cleanTxsThread, cleanTxsComplete := threads.NewPeriodicThreadComplete("Clean Txs",
@@ -142,7 +134,6 @@ func main() {
 			previousTime = time.Now()
 			return nil
 		}, 5*time.Minute, &wait)
-	stopper.Add(cleanTxsThread)
 
 	// ---------------------------------------------------------------------------------------------
 	// Shutdown
@@ -153,7 +144,7 @@ func main() {
 	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
 
 	managerThread.Start(ctx)
-	// processBlocksThread.Start(ctx)
+	processBlocksThread.Start(ctx)
 	saveThread.Start(ctx)
 	cleanTxsThread.Start(ctx)
 	processTxThread.Start(ctx)
@@ -172,18 +163,28 @@ func main() {
 	case <-processTxComplete:
 		logger.Warn(ctx, "Finished: Process Txs")
 
-	// case <-processBlocksComplete:
-	// logger.Warn(ctx, "Finished: Process Blocks")
+	case <-processBlocksComplete:
+		logger.Warn(ctx, "Finished: Process Blocks")
 
 	case <-osSignals:
 		logger.Info(ctx, "Shutdown requested")
 	}
 
 	// Stop remaining threads
-	stopper.Stop(ctx)
+	headers.Stop(ctx)
+	managerThread.Stop(ctx)
 
 	// Block until goroutines finish
-	waitWarning := logger.NewWaitingWarning(ctx, 3*time.Second, "Shutdown")
+	waitWarning := logger.NewWaitingWarning(ctx, 3*time.Second, "Node Manager Shutdown")
+	managerWait.Wait()
+	waitWarning.Cancel()
+
+	txManager.Stop(ctx)
+	processBlocksThread.Stop(ctx)
+	saveThread.Stop(ctx)
+	cleanTxsThread.Stop(ctx)
+
+	waitWarning = logger.NewWaitingWarning(ctx, 3*time.Second, "Tx Manager Shutdown")
 	wait.Wait()
 	waitWarning.Cancel()
 

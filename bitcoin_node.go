@@ -75,6 +75,8 @@ type BitcoinNode struct {
 
 	isVerifyOnly bool // disconnect after chain verification
 
+	interrupt <-chan interface{}
+
 	sync.Mutex
 }
 
@@ -355,6 +357,8 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	logger.VerboseWithFields(ctx, []logger.Field{
 		logger.String("address", n.address),
 	}, "Connecting to node")
+
+	n.interrupt = interrupt
 
 	if err := n.connect(ctx); err != nil {
 		n.Lock()

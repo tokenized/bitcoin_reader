@@ -64,13 +64,30 @@ func (n *BitcoinNode) handleMessage(ctx context.Context, connection net.Conn) er
 	} else if command == wire.CmdBlock {
 		timeout = time.Minute
 	}
-	waitWarning := logger.NewWaitingWarning(ctx, timeout, "Handle message: %s (%s)", command,
-		sizeString(header.Length))
-	if err := handler(ctx, header, connection); err != nil {
-		waitWarning.Cancel()
-		return errors.Wrapf(err, "handle: %s", command)
+
+	errChan := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		errChan <- handler(ctx, header, connection)
+	}()
+
+	for {
+		select {
+		case err := <-errChan:
+			if err != nil {
+				return errors.Wrapf(err, "handle: %s", command)
+			}
+
+			return nil
+
+		case <-time.After(timeout):
+			logger.WarnWithFields(ctx, []logger.Field{
+				logger.String("command", command),
+				logger.String("size", sizeString(header.Length)),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Waiting for handle message")
+		}
 	}
-	waitWarning.Cancel()
 
 	return nil
 }
@@ -292,6 +309,17 @@ func (n *BitcoinNode) handleHeadersTrack(ctx context.Context, header *wire.Messa
 
 	var firstHash *bitcoin.Hash32
 	for i := uint64(0); i < count; i++ {
+		select {
+		case <-n.interrupt:
+			logger.DebugWithFields(ctx, []logger.Field{
+				logger.Uint64("header_index", i),
+				logger.Uint64("header_count", count),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Aborting handle headers")
+			return nil
+		default:
+		}
+
 		blockHeader, txCount, err := deserializeBlockHeader(ctx, rc)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("read header %d/%d", i, count))
@@ -394,10 +422,12 @@ func (n *BitcoinNode) handleReject(ctx context.Context, header *wire.MessageHead
 
 	// TODO Possibly perform actions based on reject messages. --ce
 	// * Mark txs as suspected to be invalid.
+	// We currently get a lot of rejects from nodes having tx fee rates set too high.
 	logger.InfoWithFields(ctx, []logger.Field{
 		logger.String("command", msg.Cmd),
 		logger.Stringer("reject_code", msg.Code),
 		logger.String("reason", msg.Reason),
+		logger.Stringer("hash", msg.Hash),
 	}, "Received reject")
 
 	return nil
@@ -499,6 +529,7 @@ func (n *BitcoinNode) handleInventory(ctx context.Context, header *wire.MessageH
 		return nil // remaining message data will be discarded by deferred discard above
 	}
 
+	start := time.Now()
 	count, err := wire.ReadVarInt(r, wire.ProtocolVersion)
 	if err != nil {
 		return errors.Wrap(err, "inventory count")
@@ -510,6 +541,17 @@ func (n *BitcoinNode) handleInventory(ctx context.Context, header *wire.MessageH
 
 	invRequest := wire.NewMsgGetData()
 	for i := uint64(0); i < count; i++ {
+		select {
+		case <-n.interrupt:
+			logger.DebugWithFields(ctx, []logger.Field{
+				logger.Uint64("inventory_index", i),
+				logger.Uint64("inventory_count", count),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Aborting handle inventory")
+			return nil
+		default:
+		}
+
 		item, err := readInvVect(ctx, r)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("inv vect %d / %d", i, count))
@@ -565,17 +607,48 @@ func (n *BitcoinNode) handleTx(ctx context.Context, header *wire.MessageHeader,
 	}
 
 	counter := threads.NewWriteCounter()
-	r = io.TeeReader(r, counter)
+	rc := io.TeeReader(r, counter)
+	rb := threads.NewReadCloser(rc)
 
 	tx := &wire.MsgTx{}
-	if err := readMessage(r, header, tx); err != nil {
-		return errors.Wrap(err, "read message")
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- readMessage(rb, header, tx)
+	}()
+
+	timeout := time.Second * 10
+	minTimeout := time.Second * time.Duration(header.Length/1e4) // Slower than 10kB per second
+	if minTimeout > timeout {
+		timeout = minTimeout
 	}
 
-	if time.Since(start).Seconds() > 3.0 {
-		logger.ElapsedWithFields(ctx, start, []logger.Field{
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return errors.Wrap(err, "read message")
+		}
+
+	case <-n.interrupt:
+		rb.Close()
+		return nil
+
+	case <-time.After(timeout):
+		rb.Close()
+		remaining := header.Length - counter.Count()
+		logger.WarnWithFields(ctx, []logger.Field{
+			logger.Float64("tx_size_kb", float64(header.Length)/1e3),
+			logger.Float64("remaining_kb", float64(remaining)/1e3),
+			logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+		}, "Transaction download too slow")
+		return errors.New("Transaction download too slow")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed.Seconds() > 3.0 {
+		logger.InfoWithFields(ctx, []logger.Field{
 			logger.Stringer("txid", tx.TxHash()),
-			logger.Float64("tx_size_mb", float64(header.Length)/1e6),
+			logger.Float64("tx_size_kb", float64(header.Length)/1e3),
+			logger.MillisecondsFromNano("elapsed_ms", elapsed.Nanoseconds()),
 		}, "Downloaded tx")
 	}
 
@@ -584,7 +657,7 @@ func (n *BitcoinNode) handleTx(ctx context.Context, header *wire.MessageHeader,
 	n.txReceivedSize += counter.Count()
 	n.Unlock()
 
-	if err := txManager.AddTx(ctx, id, tx); err != nil {
+	if err := txManager.AddTx(ctx, n.interrupt, id, tx); err != nil {
 		return errors.Wrap(err, "add tx")
 	}
 
@@ -633,6 +706,7 @@ func (n *BitcoinNode) completeBlock(ctx context.Context, blockHash *bitcoin.Hash
 func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeader,
 	r io.Reader) error {
 
+	start := time.Now()
 	counter := threads.NewWriteCounter()
 	rc := io.TeeReader(r, counter)
 
@@ -707,6 +781,21 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 	blockHandlerThread.Start(ctx)
 
 	for i := uint64(0); i < txCount; i++ {
+		select {
+		case <-n.interrupt:
+			logger.DebugWithFields(ctx, []logger.Field{
+				logger.Uint64("tx_index", i),
+				logger.Uint64("tx_count", txCount),
+				logger.MillisecondsFromNano("elapsed_ms", time.Since(start).Nanoseconds()),
+			}, "Aborting handle block")
+
+			close(txChannel)
+			wait.Wait()
+			return nil
+
+		default:
+		}
+
 		tx := &wire.MsgTx{}
 		if err := tx.Deserialize(rb); err != nil {
 			close(txChannel)
@@ -720,6 +809,5 @@ func (n *BitcoinNode) handleBlock(ctx context.Context, header *wire.MessageHeade
 
 	close(txChannel)
 	wait.Wait()
-
 	return nil
 }
