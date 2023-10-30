@@ -25,6 +25,7 @@ deps:
 	go get -t ./...
 
 test:
+	mkdir -p tmp
 	go test -coverprofile=tmp/coverage.out ./...
 
 test-race:

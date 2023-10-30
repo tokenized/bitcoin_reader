@@ -261,8 +261,8 @@ func (repo *Repository) GetVerifyOnlyLocatorHashes(ctx context.Context) ([]bitco
 	sort.Sort(accumulatedHeightHashes)
 
 	result := make([]bitcoin.Hash32, len(accumulatedHeightHashes))
-	for i := range result {
-		result[i] = accumulatedHeightHashes[i].Hash
+	for i, accumulatedHeightHash := range accumulatedHeightHashes {
+		result[i] = accumulatedHeightHash.Hash
 	}
 
 	return removeDuplicateHashes(result), nil
@@ -692,7 +692,7 @@ func (repo *Repository) GetHeaders(ctx context.Context,
 		if headersFile != wantFile {
 			data, err := repo.getData(ctx, wantFile)
 			if err != nil {
-				return nil, errors.Wrap(err, "get data")
+				return nil, errors.Wrapf(err, "get data: height %d, file %d", height, wantFile)
 			}
 			headersData = data
 			headersFile = wantFile

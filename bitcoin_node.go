@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tokenized/logger"
@@ -67,10 +68,10 @@ type BitcoinNode struct {
 	outgoingMsgChannel MessageChannel
 	handshakeChannel   chan wire.Message
 
-	handshakeIsComplete bool
-	isReady             bool
-	isStopped           bool
-	verified            bool
+	handshakeIsComplete atomic.Value
+	isReady             atomic.Value
+	isStopped           atomic.Value
+	verified            atomic.Value
 	protoconfCount      int
 
 	isVerifyOnly bool // disconnect after chain verification
@@ -116,6 +117,11 @@ func NewBitcoinNode(address, userAgent string, config *Config, headers HeaderRep
 		handlers:         make(MessageHandlers),
 		handshakeChannel: make(chan wire.Message, 10),
 	}
+
+	result.handshakeIsComplete.Store(false)
+	result.isReady.Store(false)
+	result.isStopped.Store(false)
+	result.verified.Store(false)
 
 	// Only enable messages that are required for handshake and verification.
 	result.handlers[wire.CmdVersion] = result.handleVersion
@@ -361,16 +367,19 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	n.interrupt = interrupt
 
 	if err := n.connect(ctx); err != nil {
-		n.Lock()
-		n.isReady = false
-		n.isStopped = true
-		n.Unlock()
+		n.isReady.Store(false)
+		n.isStopped.Store(true)
 		logger.VerboseWithFields(ctx, []logger.Field{
 			logger.String("address", n.address),
 		}, "Failed to connect to node : %s", err)
 		return nil
 	}
 
+	return n.run(ctx, interrupt)
+}
+
+func (n *BitcoinNode) run(ctx context.Context, interrupt <-chan interface{}) error {
+	n.interrupt = interrupt
 	n.outgoingMsgChannel.Open(1000)
 
 	var stopper threads.StopCombiner
@@ -411,8 +420,8 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	stopper.Stop(ctx)
 
 	n.Lock()
+	n.isReady.Store(false)
 	blockOnStop := n.blockOnStop
-	n.isReady = false
 	n.Unlock()
 
 	if blockOnStop != nil {
@@ -426,9 +435,7 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 	wait.Wait()
 	waitWarning.Cancel()
 
-	n.Lock()
-	n.isStopped = true
-	n.Unlock()
+	n.isStopped.Store(true)
 
 	return threads.CombineErrors(
 		handshakeThread.Error(),
@@ -438,6 +445,7 @@ func (n *BitcoinNode) Run(ctx context.Context, interrupt <-chan interface{}) err
 }
 
 func (n *BitcoinNode) Stop(ctx context.Context) {
+	logger.Info(ctx, "Stopping: %s", n.Address())
 	n.connectionLock.Lock()
 	if n.connection != nil {
 		n.connection.Close()
@@ -450,31 +458,19 @@ func (n *BitcoinNode) Stop(ctx context.Context) {
 }
 
 func (n *BitcoinNode) HandshakeIsComplete() bool {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.handshakeIsComplete
+	return n.handshakeIsComplete.Load().(bool)
 }
 
 func (n *BitcoinNode) IsReady() bool {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.isReady
+	return n.isReady.Load().(bool)
 }
 
 func (n *BitcoinNode) IsStopped() bool {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.isStopped
+	return n.isStopped.Load().(bool)
 }
 
 func (n *BitcoinNode) Verified() bool {
-	n.Lock()
-	defer n.Unlock()
-
-	return n.verified
+	return n.verified.Load().(bool)
 }
 
 func (n *BitcoinNode) Address() string {
@@ -549,9 +545,7 @@ func (n *BitcoinNode) handshake(ctx context.Context, interrupt <-chan interface{
 }
 
 func (n *BitcoinNode) sendVerifyInitiation(ctx context.Context) error {
-	n.Lock()
-	n.handshakeIsComplete = true
-	n.Unlock()
+	n.handshakeIsComplete.Store(true)
 
 	if err := n.sendMessage(ctx, wire.NewMsgProtoconf()); err != nil {
 		return errors.Wrap(err, "send protoconf")
@@ -567,8 +561,6 @@ func (n *BitcoinNode) sendVerifyInitiation(ctx context.Context) error {
 
 func (n *BitcoinNode) accept(ctx context.Context) error {
 	n.Lock()
-	n.isReady = true
-	n.verified = true
 
 	// Switch headers handler to tracking mode.
 	n.handlers[wire.CmdHeaders] = n.handleHeadersTrack
@@ -585,6 +577,9 @@ func (n *BitcoinNode) accept(ctx context.Context) error {
 	}
 
 	isVerifyOnly := n.isVerifyOnly
+
+	n.isReady.Store(true)
+	n.verified.Store(true)
 	n.Unlock()
 
 	if isVerifyOnly {
@@ -648,5 +643,14 @@ func (n *BitcoinNode) connect(ctx context.Context) error {
 	n.connection = connection
 	n.connectionLock.Unlock()
 	n.peers.UpdateTime(ctx, n.address)
+	return nil
+}
+
+func (n *BitcoinNode) mockConnect(ctx context.Context, connection net.Conn) error {
+	logger.Info(ctx, "Connected to mock connection")
+
+	n.connectionLock.Lock()
+	n.connection = connection
+	n.connectionLock.Unlock()
 	return nil
 }

@@ -567,7 +567,6 @@ func (n *BitcoinNode) handleInventory(ctx context.Context, header *wire.MessageH
 		}
 
 		if shouldRequest {
-			// Request
 			if err := invRequest.AddInvVect(&item); err != nil {
 				// Too many requests for one message, send it and start a new message.
 				if err := n.sendMessage(ctx, invRequest); err != nil {

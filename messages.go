@@ -49,6 +49,7 @@ func IsCloseError(err error) bool {
 	}
 	return errors.Cause(err) == io.EOF || errors.Cause(err) == io.ErrUnexpectedEOF ||
 		strings.Contains(err.Error(), "Closed") ||
+		strings.Contains(err.Error(), "closed pipe") ||
 		strings.Contains(err.Error(), "use of closed network connection") ||
 		strings.Contains(err.Error(), "connection reset by peer")
 }

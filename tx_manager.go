@@ -5,6 +5,7 @@ import (
 	"context"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tokenized/logger"
@@ -20,7 +21,7 @@ import (
 // separate locks on each map and reduces the size of each map.
 type TxManager struct {
 	txMaps         []*txMap
-	requestTimeout time.Duration
+	requestTimeout atomic.Value
 
 	txChannel chan *wire.MsgTx
 
@@ -48,10 +49,10 @@ type TxData struct {
 
 func NewTxManager(requestTimeout time.Duration) *TxManager {
 	result := &TxManager{
-		txMaps:         make([]*txMap, 256),
-		txChannel:      make(chan *wire.MsgTx, 1000),
-		requestTimeout: requestTimeout,
+		txMaps:    make([]*txMap, 256),
+		txChannel: make(chan *wire.MsgTx, 1000),
 	}
+	result.requestTimeout.Store(requestTimeout)
 
 	for i := range result.txMaps {
 		result.txMaps[i] = newTxMap()
@@ -79,8 +80,7 @@ func (m *TxManager) Run(ctx context.Context) error {
 	m.Unlock()
 
 	if txProcessor == nil {
-		// wait for channel to close
-		for range m.txChannel {
+		for range m.txChannel { // wait for channel to close
 		}
 
 		return nil
@@ -123,9 +123,10 @@ func newTxMap() *txMap {
 func (m *TxManager) AddTxID(ctx context.Context, nodeID uuid.UUID,
 	txid bitcoin.Hash32) (bool, error) {
 
+	requestTimeout := m.requestTimeout.Load().(time.Duration)
+
 	m.RLock()
 	txMap := m.txMaps[txid[0]]
-	requestTimeout := m.requestTimeout
 	m.RUnlock()
 
 	txMap.Lock()
@@ -269,9 +270,7 @@ func (l indexList) Swap(i, j int) {
 func (m *TxManager) GetTxRequests(ctx context.Context, nodeID uuid.UUID,
 	max int) ([]bitcoin.Hash32, error) {
 
-	m.RLock()
-	requestTimeout := m.requestTimeout
-	m.RUnlock()
+	requestTimeout := m.requestTimeout.Load().(time.Duration)
 
 	// Randomly sort indexes
 	indexes := make(indexList, 256)

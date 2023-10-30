@@ -2,6 +2,7 @@ package headers
 
 import (
 	"github.com/tokenized/pkg/bitcoin"
+	"github.com/tokenized/pkg/wire"
 )
 
 var (
@@ -30,6 +31,18 @@ var (
 		before: "00000000000000000102d94fde9bd0807a2cc7582fe85dd6349b73ce4e8d9322",
 		after:  "000000000000000001d956714215d96ffc00e0afda4cd0a96c96f8d802b1662b",
 		height: 556767,
+	}
+
+	// First block after the BCH/BSV split on the BSV chain.
+	mainNetRequiredHeaderPrevBlock, _  = bitcoin.NewHash32FromStr("00000000000000000102d94fde9bd0807a2cc7582fe85dd6349b73ce4e8d9322")
+	mainNetRequiredHeaderMerkleRoot, _ = bitcoin.NewHash32FromStr("da2b9eb7e8a3619734a17b55c47bdd6fd855b0afa9c7e14e3a164a279e51bba9")
+	MainNetRequiredHeader              = &wire.BlockHeader{
+		Version:    536870912,
+		PrevBlock:  *mainNetRequiredHeaderPrevBlock,
+		MerkleRoot: *mainNetRequiredHeaderMerkleRoot,
+		Timestamp:  1542305817,
+		Bits:       0x18021fdb,
+		Nonce:      1301274612,
 	}
 )
 
